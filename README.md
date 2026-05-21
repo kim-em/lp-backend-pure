@@ -37,30 +37,36 @@ example (a b : Rat) (_ : 2 * a + b ≤ 5) (_ : a - b ≤ 1) :
 
 ## Status
 
-Today the backend ships a trivially-passing `probe` and a
-placeholder `solveExact` that reports a structured "simplex not
-yet wired" error. The revised-simplex implementation in
-`LPBackendPure/Simplex.lean` is the follow-up work. Importing the
-module today is already meaningful: it registers the backend so
-`availableBackends` lists it, and `set_option lp.backend "pure"`
-switches dispatch to it (where the error message tells the user
-the algorithm is still landing).
+The backend runs a tableau-based primal simplex on `Rat` with
+Bland's anti-cycling rule, and the produced certificates re-verify
+under [`kim-em/lp-verify`](https://github.com/kim-em/lp-verify).
+The first-cut scope is deliberately tiny:
 
-Scope of the eventual simplex (deliberately tiny first cut):
-- Inequality form only (no equality rows, no ranged constraints).
-- Non-negative variables only (no free / bounded columns).
-- Primal-feasible starting point only (no two-phase).
+- Inequality form only (every row is `(none, some hi)`).
+- Non-negative variables only (every column is `(some 0, none)`).
+- Primal-feasible starting basis only (every `hi ≥ 0`).
 
-Wider coverage will land incrementally as the verifier's existing
-test corpus exercises edge cases.
+Anything outside that — equality rows, ranged constraints, free
+or upper-bounded columns, negative right-hand sides — is rejected
+with a structured `SolveError.bridge` carrying an actionable
+message. Coverage will grow incrementally; two-phase / Big-M is
+the next step.
+
+Maximisation is handled by canonicalising to minimisation. The
+certificate is against the canonical (min) problem, matching
+`Soplex.Verify.IsOptimal`. `Solution.objective` is restored to
+the caller's original sense.
 
 ## Layout
 
 ```
 LPBackendPure.lean         # top-level import
 LPBackendPure/
-  Backend.lean             # def backend : LPBackend, probe, solveExact
-  Simplex.lean             # revised-simplex implementation (TODO)
+  Backend.lean             # LPBackend value, probe, solveExact wrapper
+  Simplex.lean             # primal simplex on Rat with Bland's rule
+LPBackendPureTest/
+  Simplex.lean             # behavioral tests; re-verifies certificates
+  Runner.lean              # `lake test` entry point
 ```
 
 The backend lives under `namespace Soplex.Backend.Pure`, mirroring
