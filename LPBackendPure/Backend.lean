@@ -27,18 +27,14 @@ open Soplex Soplex.LP
 def probe : IO (Except String Unit) :=
   pure (.ok ())
 
-/-- Pure-Lean LP solve.
-
-    TODO: dispatch to `LPBackendPure.Simplex` once the revised
-    simplex implementation lands. Until then the backend
-    self-registers (so `availableBackends` lists it) but reports a
-    structured "not yet wired" error from `solveExact`. -/
-def solveExact {m n : Nat} (_opts : Options) (_p : Problem m n) :
-    IO (Except SolveError (Solution m n)) := do
-  return Except.error
-    (SolveError.bridge
-      "pure-Lean backend: simplex implementation not yet wired; \
-       see kim-em/lp-backend-pure `LPBackendPure/Simplex.lean`")
+/-- Pure-Lean LP solve. Dispatches to `LPBackendPure.Simplex.solve`,
+    which runs a tableau-based primal simplex on `Rat` with Bland's
+    anti-cycling rule. See `LPBackendPure/Simplex.lean` for the
+    accepted first-cut scope (inequality form, non-negative
+    variables, primal-feasible starting basis). -/
+def solveExact {m n : Nat} (opts : Options) (p : Problem m n) :
+    IO (Except SolveError (Solution m n)) :=
+  pure (Simplex.solve opts p)
 
 /-- The `LPBackend` value registered with the tactic registry. -/
 def backend : LPBackend where
