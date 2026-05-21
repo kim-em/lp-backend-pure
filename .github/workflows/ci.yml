@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    name: Build (no native deps)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        if: runner.os != 'Windows'
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Install elan (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-pc-windows-msvc.zip -o elan-init.zip
+          unzip -q elan-init.zip
+          ./elan-init.exe -y --default-toolchain none --no-modify-path
+          echo "$USERPROFILE\\.elan\\bin" >> "$GITHUB_PATH"
+      # Pure-Lean package; no native deps deliberately installed.
+      - run: lean --version
+      - run: lake build
