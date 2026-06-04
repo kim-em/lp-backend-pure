@@ -678,6 +678,21 @@ private def translateSolution {m n : Nat} (p : Problem m n)
             certificate := { primal := none, dual := some dual, ray := none }
             log         := sol.log }
       | none => { sol with certificate := default }
+  | .iterLimit =>
+      -- Preserve the partial primal from `iterLimitSolution` by
+      -- translating it back through the preprocessing column map.
+      -- Still no certificate semantics — the verifier won't accept
+      -- this — but the caller gets a usable diagnostic.
+      let cert : Certificate m n :=
+        match sol.certificate.primal with
+        | some y =>
+            let xArr := translatePrimal pp.colMap p.colBounds.toArray y.toArray
+            { primal := some (toVec xArr n), dual := none, ray := none }
+        | none => default
+      { status      := .iterLimit
+        objective   := sol.objective
+        certificate := cert
+        log         := sol.log }
   | _ =>
       { status      := sol.status
         objective   := sol.objective
@@ -743,12 +758,26 @@ private def infeasibleSolution {m n : Nat} (st : State) (n_ m_ : Nat) :
     certificate := cert
     log         := "" }
 
-/-- Iteration-limit solution. -/
-private def iterLimitSolution {m n : Nat} : Solution m n :=
+/-- Iteration-limit solution. Surfaces the partial primal assignment
+    that `extractPrimal` reads off the current basis, the simplex
+    pivot count consumed from `Options.iterLimit`, and a short
+    diagnostic log. The count is the number of pivots `simplexLoop`
+    drew from the fuel budget — the small bounded basis-cleanup
+    pivots in `driveOutArtificials` are not counted. `status =
+    .iterLimit` still means "no certificate" — the verifier will not
+    accept this primal — but the caller now has something to inspect
+    instead of a bare `Inhabited` default. See issue #12. -/
+private def iterLimitSolution {m n : Nat} (st : State) (n_ rhsCol : Nat)
+    (pivots : Nat) (phase : String) : Solution m n :=
+  let xArr := extractPrimal st n_ rhsCol
+  let cert : Certificate m n :=
+    { primal := some (toVec xArr n)
+      dual   := none
+      ray    := none }
   { status      := .iterLimit
     objective   := none
-    certificate := default
-    log         := "" }
+    certificate := cert
+    log         := s!"iteration limit reached during {phase} after {pivots} simplex pivot(s)" }
 
 /-- Solve a min-form standard problem and produce a certificate against it. -/
 private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
@@ -764,15 +793,16 @@ private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
     -- Phase 1 (skipped when there are no artificials).
     if numArt = 0 then
       let stP2 := setupPhase2 st0 p colCount
-      match (simplexLoop stP2 (n + m) rhsCol fuel).1 with
-      | .iterLimit _      => .ok iterLimitSolution
+      let (out2, fuel2) := simplexLoop stP2 (n + m) rhsCol fuel
+      match out2 with
+      | .iterLimit st       => .ok (iterLimitSolution st n rhsCol (fuel - fuel2) "phase 2")
       | .unbounded st enter => .ok (unboundedSolution st enter n rhsCol)
-      | .optimal st       => .ok (optimalSolution p st n m rhsCol)
+      | .optimal st         => .ok (optimalSolution p st n m rhsCol)
     else
       let stP1 := setupPhase1 st0 infos colCount
       let (out1, fuel1) := simplexLoop stP1 totalVars rhsCol fuel
       match out1 with
-      | .iterLimit _ => .ok iterLimitSolution
+      | .iterLimit st => .ok (iterLimitSolution st n rhsCol (fuel - fuel1) "phase 1")
       | .unbounded _ _ =>
         -- Phase 1 minimises a sum of nonneg variables, bounded below
         -- by `0`. Unboundedness here is a bridge-invariant violation.
@@ -783,10 +813,11 @@ private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
         else
           let stClean := driveOutArtificials st1 n m rhsCol
           let stP2 := setupPhase2 stClean p colCount
-          match (simplexLoop stP2 (n + m) rhsCol fuel1).1 with
-          | .iterLimit _      => .ok iterLimitSolution
+          let (out2, fuel2) := simplexLoop stP2 (n + m) rhsCol fuel1
+          match out2 with
+          | .iterLimit st       => .ok (iterLimitSolution st n rhsCol (fuel - fuel2) "phase 2")
           | .unbounded st enter => .ok (unboundedSolution st enter n rhsCol)
-          | .optimal st       => .ok (optimalSolution p st n m rhsCol)
+          | .optimal st         => .ok (optimalSolution p st n m rhsCol)
 
 /-- Solve a min-form problem and produce a certificate against it. -/
 private def solveCanon {m n : Nat} (p : Problem m n) (fuel : Nat) :
