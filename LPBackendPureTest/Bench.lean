@@ -9,7 +9,6 @@
 -/
 
 import LPBackendPure
-import LPTactic
 
 namespace LPBackendPureTest.Bench
 

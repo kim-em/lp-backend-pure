@@ -1,11 +1,14 @@
 /-
   Pure-Lean two-phase primal simplex on `Rat`.
 
-  This module implements a tableau-based primal simplex with
-  Bland's anti-cycling rule. The whole computation runs on `Rat`
-  — no Float relaxation, even for pivot selection — because the
-  verifier consumes exact-rational certificates and any rounding
-  here would be wasted at the boundary.
+  This module implements a tableau-based primal simplex. The entering
+  rule is Dantzig (most-negative reduced cost) with a Bland fallback:
+  `simplexLoop` counts consecutive degenerate pivots and permanently
+  switches to Bland once the count exceeds `degenThreshold`, which is
+  enough to preserve the anti-cycling guarantee in practice. The
+  whole computation runs on `Rat` — no Float relaxation, even for
+  pivot selection — because the verifier consumes exact-rational
+  certificates and any rounding here would be wasted at the boundary.
 
   "Revised simplex" in the issue title refers to the exact-Rat
   requirement, not specifically to the `B⁻¹`-maintaining
@@ -334,12 +337,12 @@ private inductive Outcome where
   | iterLimit (st : State)
   deriving Inhabited
 
-/-- Threshold of consecutive degenerate pivots (objective unchanged
-    between successive pivots) before `simplexLoop` permanently
-    switches the entering rule from Dantzig to Bland. Cycling under
-    Dantzig requires a long run of degenerate pivots, so a generous
-    threshold is essentially free on non-degenerate problems while
-    still cutting cycles off before they get expensive. -/
+/-- Threshold of consecutive degenerate pivots (objective row value
+    unchanged between successive pivots) before `simplexLoop`
+    permanently switches the entering rule from Dantzig to Bland.
+    Cycling under Dantzig requires a long run of degenerate pivots,
+    so a generous threshold is essentially free on non-degenerate
+    problems while still cutting cycles off before they get expensive. -/
 private def degenThreshold (basisSize : Nat) : Nat := 2 * basisSize + 10
 
 /-- Driver loop. Bland's rule guarantees termination in finitely
