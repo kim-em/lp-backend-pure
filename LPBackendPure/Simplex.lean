@@ -35,6 +35,14 @@
   lower bounds are shifted, upper-only bounds are flipped, and boxed
   variables get an added upper-bound row.
 
+  Likewise, every row-bound shape is accepted by row preprocessing:
+  `(none, some hi)` stays as one upper row; `(some lo, none)` is
+  sign-flipped to `-a · x ≤ -lo`; `(some lo, some hi)` (equality or
+  proper range) splits into two upper rows `a · x ≤ hi` and
+  `-a · x ≤ -lo`; `(none, none)` is dropped. The dual multipliers from
+  the preprocessed problem are recombined into the original
+  `(rowLower, rowUpper)` split by `translateDual`.
+
   Maximisation is handled by canonicalising to minimisation
   (`Soplex.canonicalize`) before solving — the resulting certificate
   is for the canonical (min) form, which matches the verifier's
@@ -416,11 +424,29 @@ private inductive ColMap where
   | boxed (col row : Nat)
   deriving Inhabited
 
+/-- How an original row was encoded as 0–2 upper-only rows in the
+    preprocessed problem. Used by `translateDual` to recombine the
+    preprocessed multipliers back into the original (lower, upper)
+    split.
+
+    * `upperOnly r`        — original `(none, some hi)`, kept as one row.
+    * `lowerOnly r`        — original `(some lo, none)`, sign-flipped.
+    * `ranged rUp rLo`     — original `(some lo, some hi)` (equality or
+                              proper range), split into two rows.
+    * `dropped`            — original `(none, none)`, no constraint. -/
+private inductive RowMap where
+  | upperOnly (row : Nat)
+  | lowerOnly (row : Nat)
+  | ranged    (rowUp rowLo : Nat)
+  | dropped
+  deriving Inhabited
+
 private structure Preprocessed (m n : Nat) where
   m'       : Nat
   n'       : Nat
   problem  : Problem m' n'
   colMap   : Array ColMap
+  rowMap   : Array RowMap
 
 private def addEntry (entries : Array (Nat × Nat × Rat)) (row col : Nat)
     (value : Rat) : Array (Nat × Nat × Rat) :=
@@ -448,10 +474,38 @@ private def colShift (bounds : Array (Option Rat × Option Rat)) (j : Nat) : Rat
 
 private def preprocess {m n : Nat} (p : Problem m n) :
     Except ScopeError (Preprocessed m n) := do
+  -- Row preprocessing: each original `(lo, hi)` row maps to 0–2
+  -- upper-only rows in the preprocessed problem.
+  let mut rowMaps : Array RowMap := Array.mkEmpty m
+  -- `rowSpecs[k] = (origRow, sign, rhsRaw)` for new row `k`:
+  -- the new constraint is `sign · aᵢ · x ≤ rhsRaw` (before column shift).
+  let mut rowSpecs : Array (Nat × Rat × Rat) := #[]
   for i in [:m] do
     match p.rowBounds.toArray[i]! with
-    | (none, some _) => pure ()
-    | _ => throw (.rowNotUpperOnly i)
+    | (none, some hi) =>
+        let r := rowSpecs.size
+        rowSpecs := rowSpecs.push (i, 1, hi)
+        rowMaps := rowMaps.push (.upperOnly r)
+    | (some lo, none) =>
+        let r := rowSpecs.size
+        rowSpecs := rowSpecs.push (i, -1, -lo)
+        rowMaps := rowMaps.push (.lowerOnly r)
+    | (some lo, some hi) =>
+        let rUp := rowSpecs.size
+        rowSpecs := rowSpecs.push (i, 1, hi)
+        let rLo := rowSpecs.size
+        rowSpecs := rowSpecs.push (i, -1, -lo)
+        rowMaps := rowMaps.push (.ranged rUp rLo)
+    | (none, none) =>
+        rowMaps := rowMaps.push .dropped
+  let mFromRows := rowSpecs.size
+  -- For each original row, list its `(newRow, sign)` children so we
+  -- can dispatch sparse-matrix entries with a single pass over `p.a`.
+  let mut rowOrigToNew : Array (Array (Nat × Rat)) := Array.replicate m #[]
+  for r in [:rowSpecs.size] do
+    let (origRow, sign, _) := rowSpecs[r]!
+    rowOrigToNew := rowOrigToNew.set! origRow
+      ((rowOrigToNew[origRow]!).push (r, sign))
 
   let colBounds := p.colBounds.toArray
   let mut maps : Array ColMap := #[]
@@ -486,7 +540,7 @@ private def preprocess {m n : Nat} (p : Problem m n) :
         shift := shift.push 0
     | (some lo, some hi) =>
         let col := nextCol
-        let row := m + nextExtraRow
+        let row := mFromRows + nextExtraRow
         nextCol := nextCol + 1
         nextExtraRow := nextExtraRow + 1
         maps := maps.push (.boxed col row)
@@ -494,21 +548,26 @@ private def preprocess {m n : Nat} (p : Problem m n) :
         shift := shift.push lo
         addedRows := addedRows.push (row, col, hi - lo)
 
-  let m' := m + nextExtraRow
+  let m' := mFromRows + nextExtraRow
   let n' := nextCol
-  let mut rowShift : Array Rat := Array.replicate m 0
+  -- `rowShiftOrig[i] = Σ_c a_{i,c} · shift[c]`; the new row's rhs is
+  -- `rhsRaw - sign · rowShiftOrig[origRow]`.
+  let mut rowShiftOrig : Array Rat := Array.replicate m 0
   let mut entries : Array (Nat × Nat × Rat) := #[]
   for entry in p.a do
     let (r, c, v) := entry
     let i := r.val
     let j := c.val
-    rowShift := rowShift.set! i (rowShift[i]! + v * shift[j]!)
-    match maps[j]! with
-    | .lower col | .upperFlip col | .boxed col _ =>
-        entries := addEntry entries i col (v * colCoeff maps j col)
-    | .free pos neg =>
-        entries := addEntry entries i pos v
-        entries := addEntry entries i neg (-v)
+    rowShiftOrig := rowShiftOrig.set! i (rowShiftOrig[i]! + v * shift[j]!)
+    for nr in rowOrigToNew[i]! do
+      let (newRow, sign) := nr
+      let signedV := sign * v
+      match maps[j]! with
+      | .lower col | .upperFlip col | .boxed col _ =>
+          entries := addEntry entries newRow col (signedV * colCoeff maps j col)
+      | .free pos neg =>
+          entries := addEntry entries newRow pos signedV
+          entries := addEntry entries newRow neg (-signedV)
 
   for added in addedRows do
     let (row, col, _) := added
@@ -517,11 +576,11 @@ private def preprocess {m n : Nat} (p : Problem m n) :
   let cVec : Vector Rat n' := Vector.ofFn (fun j => cRaw[j.val]!)
   let objOffset := p.objOffset + dotArr p.c.toArray shift
   let rb : Vector (Option Rat × Option Rat) m' := Vector.ofFn fun i =>
-    if i.val < m then
-      let hi := (p.rowBounds.toArray[i.val]!).2.getD 0
-      (none, some (hi - rowShift[i.val]!))
+    if i.val < mFromRows then
+      let (origRow, sign, rhsRaw) := rowSpecs[i.val]!
+      (none, some (rhsRaw - sign * rowShiftOrig[origRow]!))
     else
-      let extra := i.val - m
+      let extra := i.val - mFromRows
       let rhs := addedRows[extra]!.2.2
       (none, some rhs)
   let cb : Vector (Option Rat × Option Rat) n' :=
@@ -532,7 +591,7 @@ private def preprocess {m n : Nat} (p : Problem m n) :
       a := sparseEntries m' n' entries
       rowBounds := rb
       colBounds := cb }
-  pure { m' := m', n' := n', problem := p', colMap := maps }
+  pure { m' := m', n' := n', problem := p', colMap := maps, rowMap := rowMaps }
 
 private def translatePrimal (maps : Array ColMap) (bounds : Array (Option Rat × Option Rat))
     (y : Array Rat) : Array Rat := Id.run do
@@ -561,8 +620,16 @@ private def translateRay (maps : Array ColMap) (r : Array Rat) : Array Rat := Id
 
 private def translateDual {m n m' n' : Nat} (pp : Preprocessed m n)
     (d : DualBundle m' n') : DualBundle m n :=
-  let rowLower : Vector Rat m := zeroVec m
-  let rowUpper : Vector Rat m := Vector.ofFn (fun i => d.rowUpper.toArray[i.val]!)
+  let rowLower : Vector Rat m := Vector.ofFn fun i =>
+    match pp.rowMap[i.val]! with
+    | .upperOnly _ | .dropped => 0
+    | .lowerOnly r            => d.rowUpper.toArray[r]!
+    | .ranged _ rLo           => d.rowUpper.toArray[rLo]!
+  let rowUpper : Vector Rat m := Vector.ofFn fun i =>
+    match pp.rowMap[i.val]! with
+    | .lowerOnly _ | .dropped => 0
+    | .upperOnly r            => d.rowUpper.toArray[r]!
+    | .ranged rUp _           => d.rowUpper.toArray[rUp]!
   let colLower : Vector Rat n := Vector.ofFn fun j =>
     match pp.colMap[j.val]! with
     | .lower col | .boxed col _ => d.colLower.toArray[col]!

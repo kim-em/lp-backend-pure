@@ -55,6 +55,24 @@ private def mkLEWithCols (m n : Nat) (c : List Rat) (a : List (Nat × Nat × Rat
   { c := cVec, objOffset := 0, a := aArr,
     rowBounds := rb, colBounds := cb }
 
+/-- Construct a problem with caller-provided row and column bounds. -/
+private def mkRowsCols (m n : Nat) (c : List Rat) (a : List (Nat × Nat × Rat))
+    (rows : List (Option Rat × Option Rat))
+    (cols : List (Option Rat × Option Rat)) : Problem m n :=
+  let cVec : Vector Rat n :=
+    Vector.ofFn (fun j => (c[j.val]?).getD 0)
+  let aArr : Array (Fin m × Fin n × Rat) :=
+    a.toArray.filterMap fun (r, k, v) =>
+      if hr : r < m then
+        if hk : k < n then some (⟨r, hr⟩, ⟨k, hk⟩, v) else none
+      else none
+  let rb : Vector (Option Rat × Option Rat) m :=
+    Vector.ofFn (fun i => (rows[i.val]?).getD (none, none))
+  let cb : Vector (Option Rat × Option Rat) n :=
+    Vector.ofFn (fun j => (cols[j.val]?).getD (some 0, none))
+  { c := cVec, objOffset := 0, a := aArr,
+    rowBounds := rb, colBounds := cb }
+
 private def assertM (cond : Bool) (msg : String) : IO Unit :=
   unless cond do throw (IO.userError msg)
 
@@ -200,8 +218,72 @@ private def case_infeasibleFreeVar : IO Unit :=
     (mkLEWithCols 2 1 [0] [(0,0,1),(1,0,-1)] [0, -1] [(none, none)])
     .infeasible none
 
+-- Equality row: `x + y = 3, 0 ≤ x ≤ 5, 0 ≤ y ≤ 5`, minimise `-x` →
+-- `x = 3, y = 0, obj = -3`. Exercises the `(some 3, some 3)` row
+-- shape, which splits into two upper-only rows.
+private def case_equalityRow : IO Unit :=
+  runCase "equality row x+y=3, min -x" {}
+    (mkRowsCols 1 2 [-1, 0] [(0,0,1),(0,1,1)]
+      [(some 3, some 3)] [(some 0, none), (some 0, none)])
+    .optimal (some (-3))
+
+-- ≥-row: `x + y ≥ 2, x, y ≥ 0`, minimise `x + y` → obj = 2.
+-- The lower-only row sign-flips to `-x - y ≤ -2`, exercising the
+-- two-phase startup from #5.
+private def case_geRow : IO Unit :=
+  runCase "≥-row x+y≥2, min x+y" {}
+    (mkRowsCols 1 2 [1, 1] [(0,0,1),(0,1,1)]
+      [(some 2, none)] [(some 0, none), (some 0, none)])
+    .optimal (some 2)
+
+-- Ranged row: `1 ≤ x + y ≤ 4, x, y ≥ 0`, minimise `-x - y` → obj = -4.
+-- The ranged row splits into `x+y ≤ 4` and `-(x+y) ≤ -1`.
+private def case_rangedRow : IO Unit :=
+  runCase "ranged 1≤x+y≤4, min -x-y" {}
+    (mkRowsCols 1 2 [-1, -1] [(0,0,1),(0,1,1)]
+      [(some 1, some 4)] [(some 0, none), (some 0, none)])
+    .optimal (some (-4))
+
+-- Lower-only row in conjunction with an upper-only row:
+-- `x + y ≥ 2, x ≤ 3, x, y ≥ 0`, minimise `x + y` → obj=2.
+private def case_lowerOnlyMixed : IO Unit :=
+  runCase "lower-only + upper-only, min x+y" {}
+    (mkRowsCols 2 2 [1, 1] [(0,0,1),(0,1,1),(1,0,1)]
+      [(some 2, none), (none, some 3)] [(some 0, none), (some 0, none)])
+    .optimal (some 2)
+
+-- (none, none) row: trivially satisfied, no constraint.
+-- `min x s.t. (no row constraint on row 0), x ≤ 5, x ≥ 0` → x=0.
+private def case_freeRow : IO Unit :=
+  runCase "free row + upper row, min x" {}
+    (mkRowsCols 2 1 [1] [(0,0,1),(1,0,1)] [(none, none), (none, some 5)]
+      [(some 0, none)])
+    .optimal (some 0)
+
+-- Infeasible equality row: `x = 2, x ≤ 1, x ≥ 0` → infeasible.
+private def case_equalityInfeasible : IO Unit :=
+  runCase "infeasible equality x=2, x≤1" {}
+    (mkRowsCols 2 1 [0] [(0,0,1),(1,0,1)]
+      [(some 2, some 2), (none, some 1)] [(some 0, none)])
+    .infeasible none
+
+-- Equality on a free variable: `x = 5` with `x` free, minimise `0` →
+-- x = 5. Exercises the row equality split together with the free-column
+-- split.
+private def case_equalityFreeVar : IO Unit :=
+  runCase "equality x=5 with free x" {}
+    (mkRowsCols 1 1 [0] [(0,0,1)] [(some 5, some 5)] [(none, none)])
+    .optimal (some 0)
+
 example (a b : Rat) (h₁ : 2*a + b ≤ 5) (h₂ : a - b ≤ 1) : 3*a ≤ 6 := by
   lp
+
+-- Equality hypothesis routed through the pure backend.
+example (x : Rat) (h : x = 5) : 2*x = 10 := by lp
+
+-- Two-sided (ranged) hypothesis combination via the pure backend:
+-- both bounds are needed to conclude `x = 1`.
+example (x : Rat) (h₁ : 1 ≤ x) (h₂ : x ≤ 1) : x = 1 := by lp
 
 -- The `lp` tactic's contradictory-hypotheses example from issue #5,
 -- routed end-to-end through the pure-Lean backend's `solveStandard`
@@ -227,6 +309,13 @@ def main : IO UInt32 := do
     case_twoPhaseMultiFlip
     case_infeasibleSimple
     case_infeasibleFreeVar
+    case_equalityRow
+    case_geRow
+    case_rangedRow
+    case_lowerOnlyMixed
+    case_freeRow
+    case_equalityInfeasible
+    case_equalityFreeVar
     IO.println "all simplex tests passed"
     pure 0
   catch e =>
