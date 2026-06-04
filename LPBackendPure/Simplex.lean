@@ -1,11 +1,14 @@
 /-
   Pure-Lean two-phase primal simplex on `Rat`.
 
-  This module implements a tableau-based primal simplex with
-  Bland's anti-cycling rule. The whole computation runs on `Rat`
-  — no Float relaxation, even for pivot selection — because the
-  verifier consumes exact-rational certificates and any rounding
-  here would be wasted at the boundary.
+  This module implements a tableau-based primal simplex. The entering
+  rule is Dantzig (most-negative reduced cost) with a Bland fallback:
+  `simplexLoop` counts consecutive degenerate pivots and permanently
+  switches to Bland once the count exceeds `degenThreshold`, which is
+  enough to preserve the anti-cycling guarantee in practice. The
+  whole computation runs on `Rat` — no Float relaxation, even for
+  pivot selection — because the verifier consumes exact-rational
+  certificates and any rounding here would be wasted at the boundary.
 
   "Revised simplex" in the issue title refers to the exact-Rat
   requirement, not specifically to the `B⁻¹`-maintaining
@@ -188,16 +191,20 @@ private def initialState {m n : Nat} (p : Problem m n)
     tab := tab.set! (i + 1) (row.set! c.val (row[c.val]! + sign * v))
   pure { tab := tab, basis := basis }
 
-/-- Subtract `c * row src` from `row dst` (componentwise). -/
+/-- Subtract `c * row src` from `row dst` (componentwise). Skips
+    columns where the source coefficient is zero; for those columns the
+    destination is unchanged anyway, so the multiply-by-zero is wasted
+    work. -/
 private def subRow (tab : Array (Array Rat)) (dst src : Nat) (c : Rat)
     (colCount : Nat) : Array (Array Rat) := Id.run do
-  let mut out := tab
-  let srcRow := out[src]!
-  let mut dstRow := out[dst]!
+  let srcRow := tab[src]!
+  let oldDst := tab[dst]!
+  let mut dstRow := oldDst
   for j in [:colCount] do
-    dstRow := dstRow.set! j (dstRow[j]! - c * srcRow[j]!)
-  out := out.set! dst dstRow
-  pure out
+    let v := srcRow[j]!
+    if v ≠ 0 then
+      dstRow := dstRow.set! j (oldDst[j]! - c * v)
+  pure (tab.set! dst dstRow)
 
 /-- Set up the phase 1 objective row (`1` on each artificial column),
     then price out by subtracting each artificial-basic constraint row.
@@ -239,29 +246,49 @@ private def setupPhase2 {m n : Nat} (st : State) (p : Problem m n)
 
 /-! ## Pivot selection. -/
 
-/-- Pick the entering column by Bland's rule: smallest column index
-    `j < entBound` whose reduced cost is strictly negative. The bound
-    is `n + m + numArt` in phase 1 (any column may enter) and `n + m`
-    in phase 2 (artificials are locked out). Returns `none` when the
-    current basis is already optimal within the bound. -/
-private def chooseEntering (tab : Array (Array Rat)) (entBound : Nat) :
-    Option Nat := Id.run do
+/-- Pick the entering column. With `useBland = true`, falls back to
+    Bland's rule (smallest column index with negative reduced cost),
+    which is guaranteed cycle-free. Otherwise uses Dantzig's rule
+    (most-negative reduced cost), which typically takes far fewer
+    pivots on non-degenerate LPs at the cost of giving up the
+    anti-cycling guarantee; `simplexLoop` flips to Bland after a long
+    run of degenerate pivots. The bound is `n + m + numArt` in phase 1
+    (any column may enter) and `n + m` in phase 2 (artificials are
+    locked out). Returns `none` when the current basis is already
+    optimal within the bound. -/
+private def chooseEntering (tab : Array (Array Rat)) (entBound : Nat)
+    (useBland : Bool) : Option Nat := Id.run do
+  let row0 := tab[0]!
+  if useBland then
+    for j in [:entBound] do
+      if row0[j]! < 0 then return some j
+    return none
+  let mut best : Option (Rat × Nat) := none
   for j in [:entBound] do
-    if tab[0]![j]! < 0 then return some j
-  pure none
+    let v := row0[j]!
+    if v < 0 then
+      match best with
+      | none           => best := some (v, j)
+      | some (bv, _) => if v < bv then best := some (v, j)
+  pure (best.map (·.2))
 
 /-- Pick the leaving row by the standard ratio test with Bland's
     tie-break (smallest basis-variable index among ties). Returns
     the *1-based* tableau row index, or `none` if every coefficient
     in the entering column is `≤ 0` (the LP is unbounded along
-    this direction). `rhsCol` is the column index of the rhs. -/
+    this direction). `rhsCol` is the column index of the rhs.
+
+    The row is read once per iteration into a local; this avoids two
+    `Array.get!` bounds checks per cell in the hot loop. -/
 private def chooseLeaving (st : State) (enter rhsCol : Nat) :
     Option Nat := Id.run do
   let mut best : Option (Rat × Nat × Nat) := none
-  for i in [1:st.basis.size + 1] do
-    let aij := st.tab[i]![enter]!
+  let m := st.basis.size
+  for i in [1:m + 1] do
+    let row := st.tab[i]!
+    let aij := row[enter]!
     if aij > 0 then
-      let ratio := st.tab[i]![rhsCol]! / aij
+      let ratio := row[rhsCol]! / aij
       let bv := st.basis[i - 1]!
       let take : Bool :=
         match best with
@@ -271,20 +298,33 @@ private def chooseLeaving (st : State) (enter rhsCol : Nat) :
   pure (best.map (·.2.2))
 
 /-- Pivot at entry `(row, col)`: normalise the pivot row and
-    eliminate `col` from every other row. -/
+    eliminate `col` from every other row.
+
+    Skips zero entries on both passes: dividing zero by the pivot
+    leaves it zero, and subtracting a multiple of a zero pivot-row
+    entry from another row leaves that entry alone. Dense pivot
+    columns can have many zeros and the saved `Rat` arithmetic is
+    the bulk of the speedup. -/
 private def pivot (st : State) (row col colCount : Nat) : State := Id.run do
   let mut tab := st.tab
-  let pivotVal := tab[row]![col]!
-  let pr : Array Rat := tab[row]!.map (· / pivotVal)
+  let oldPr := tab[row]!
+  let pivotVal := oldPr[col]!
+  let mut pr := oldPr
+  for j in [:colCount] do
+    let v := oldPr[j]!
+    if v ≠ 0 then
+      pr := pr.set! j (v / pivotVal)
   tab := tab.set! row pr
   for i in [:tab.size] do
     if i ≠ row then
-      let coeff := tab[i]![col]!
+      let ri := tab[i]!
+      let coeff := ri[col]!
       if coeff ≠ 0 then
-        let ri := tab[i]!
         let mut ri' := ri
         for j in [:colCount] do
-          ri' := ri'.set! j (ri[j]! - coeff * pr[j]!)
+          let pv := pr[j]!
+          if pv ≠ 0 then
+            ri' := ri'.set! j (ri[j]! - coeff * pv)
         tab := tab.set! i ri'
   pure { tab := tab, basis := st.basis.set! (row - 1) col }
 
@@ -297,6 +337,14 @@ private inductive Outcome where
   | iterLimit (st : State)
   deriving Inhabited
 
+/-- Threshold of consecutive degenerate pivots (objective row value
+    unchanged between successive pivots) before `simplexLoop`
+    permanently switches the entering rule from Dantzig to Bland.
+    Cycling under Dantzig requires a long run of degenerate pivots,
+    so a generous threshold is essentially free on non-degenerate
+    problems while still cutting cycles off before they get expensive. -/
+private def degenThreshold (basisSize : Nat) : Nat := 2 * basisSize + 10
+
 /-- Driver loop. Bland's rule guarantees termination in finitely
     many pivots, but we still take an explicit `fuel` argument so
     callers can honour `Options.iterLimit` and so the recursion is
@@ -305,10 +353,16 @@ private inductive Outcome where
     Optimality and unboundedness are checked before fuel is consumed:
     an already-optimal LP returns `.optimal` even with `fuel = 0`,
     and only an actual pivot draws from the budget. The loop returns
-    the remaining fuel so callers can share a budget across phases. -/
-private def simplexLoop (st : State) (entBound rhsCol : Nat) (fuel : Nat) :
-    Outcome × Nat :=
-  match chooseEntering st.tab entBound with
+    the remaining fuel so callers can share a budget across phases.
+
+    `useBland` and `degenCount` drive the anti-cycling fallback: we
+    enter Dantzig's rule, count consecutive pivots that leave the
+    objective row unchanged, and once that exceeds `degenThreshold`
+    we flip to Bland and stay there. -/
+private def simplexLoop (st : State) (entBound rhsCol : Nat) (fuel : Nat)
+    (useBland : Bool) (degenCount : Nat) : Outcome × Nat :=
+  let bland := useBland || degenCount > degenThreshold st.basis.size
+  match chooseEntering st.tab entBound bland with
   | none   => (.optimal st, fuel)
   | some j =>
     match chooseLeaving st j rhsCol with
@@ -316,7 +370,12 @@ private def simplexLoop (st : State) (entBound rhsCol : Nat) (fuel : Nat) :
     | some i =>
       match fuel with
       | 0        => (.iterLimit st, 0)
-      | fuel + 1 => simplexLoop (pivot st i j (rhsCol + 1)) entBound rhsCol fuel
+      | fuel + 1 =>
+        let prevObj := st.tab[0]![rhsCol]!
+        let st' := pivot st i j (rhsCol + 1)
+        let degenCount' :=
+          if st'.tab[0]![rhsCol]! = prevObj then degenCount + 1 else 0
+        simplexLoop st' entBound rhsCol fuel bland degenCount'
 
 /-! ## Phase 1 helpers. -/
 
@@ -793,14 +852,14 @@ private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
     -- Phase 1 (skipped when there are no artificials).
     if numArt = 0 then
       let stP2 := setupPhase2 st0 p colCount
-      let (out2, fuel2) := simplexLoop stP2 (n + m) rhsCol fuel
+      let (out2, fuel2) := simplexLoop stP2 (n + m) rhsCol fuel false 0
       match out2 with
       | .iterLimit st       => .ok (iterLimitSolution st n rhsCol (fuel - fuel2) "phase 2")
       | .unbounded st enter => .ok (unboundedSolution st enter n rhsCol)
       | .optimal st         => .ok (optimalSolution p st n m rhsCol)
     else
       let stP1 := setupPhase1 st0 infos colCount
-      let (out1, fuel1) := simplexLoop stP1 totalVars rhsCol fuel
+      let (out1, fuel1) := simplexLoop stP1 totalVars rhsCol fuel false 0
       match out1 with
       | .iterLimit st => .ok (iterLimitSolution st n rhsCol (fuel - fuel1) "phase 1")
       | .unbounded _ _ =>
@@ -813,7 +872,7 @@ private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
         else
           let stClean := driveOutArtificials st1 n m rhsCol
           let stP2 := setupPhase2 stClean p colCount
-          let (out2, fuel2) := simplexLoop stP2 (n + m) rhsCol fuel1
+          let (out2, fuel2) := simplexLoop stP2 (n + m) rhsCol fuel1 false 0
           match out2 with
           | .iterLimit st       => .ok (iterLimitSolution st n rhsCol (fuel - fuel2) "phase 2")
           | .unbounded st enter => .ok (unboundedSolution st enter n rhsCol)

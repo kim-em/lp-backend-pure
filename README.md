@@ -38,8 +38,9 @@ example (a b : Rat) (_ : 2 * a + b ≤ 5) (_ : a - b ≤ 1) :
 ## Status
 
 The backend runs a two-phase tableau-based primal simplex on `Rat`
-with Bland's anti-cycling rule, and the produced certificates
-re-verify under [`kim-em/lp-verify`](https://github.com/kim-em/lp-verify).
+(Dantzig's rule with a Bland fallback on suspected cycling), and
+the produced certificates re-verify under
+[`kim-em/lp-verify`](https://github.com/kim-em/lp-verify).
 The supported scope now matches the FFI backend on the `by lp`
 examples in `SoplexTest/LP.lean` (see
 `LPBackendPureTest/LPParity.lean`):

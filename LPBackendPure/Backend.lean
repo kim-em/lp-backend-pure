@@ -28,11 +28,11 @@ def probe : IO (Except String Unit) :=
   pure (.ok ())
 
 /-- Pure-Lean LP solve. Dispatches to `LPBackendPure.Simplex.solve`,
-    which runs a tableau-based primal simplex on `Rat` with Bland's
-    anti-cycling rule. See `LPBackendPure/Simplex.lean` for the
-    accepted first-cut scope (upper-only rows, arbitrary column
-    bounds via preprocessing, primal-feasible starting basis after
-    preprocessing). -/
+    which runs a tableau-based primal simplex on `Rat` (Dantzig's rule
+    with a Bland fallback on suspected cycling). See
+    `LPBackendPure/Simplex.lean` for the accepted first-cut scope
+    (upper-only rows, arbitrary column bounds via preprocessing,
+    primal-feasible starting basis after preprocessing). -/
 def solveExact {m n : Nat} (opts : Options) (p : Problem m n) :
     IO (Except SolveError (Solution m n)) :=
   pure (Simplex.solve opts p)

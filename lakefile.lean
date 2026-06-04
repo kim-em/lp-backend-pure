@@ -42,6 +42,11 @@ lean_lib LPBackendPureTest where
 lean_exe «simplex-tests» where
   root := `LPBackendPureTest.Simplex
 
+/-- Throwaway perf benchmark; not run by `lake test`, not part of the
+    `LPBackendPureTest` library — its root is reached only via this exe. -/
+lean_exe «simplex-bench» where
+  root := `LPBackendPureTest.Bench
+
 /-- `lake test` entry point. Runs every test exe. -/
 @[test_driver]
 lean_exe «test-runner» where
