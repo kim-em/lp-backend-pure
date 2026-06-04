@@ -37,26 +37,31 @@ example (a b : Rat) (_ : 2 * a + b ≤ 5) (_ : a - b ≤ 1) :
 
 ## Status
 
-The backend runs a tableau-based primal simplex on `Rat` with
-Bland's anti-cycling rule, and the produced certificates re-verify
-under [`kim-em/lp-verify`](https://github.com/kim-em/lp-verify).
-The first-cut scope is still deliberately small:
+The backend runs a two-phase tableau-based primal simplex on `Rat`
+with Bland's anti-cycling rule, and the produced certificates
+re-verify under [`kim-em/lp-verify`](https://github.com/kim-em/lp-verify).
+The supported scope now matches the FFI backend on the `by lp`
+examples in `SoplexTest/LP.lean` (see
+`LPBackendPureTest/LPParity.lean`):
 
-- Upper-only rows (every row is `(none, some hi)`).
-- Arbitrary column-bound shapes, preprocessed into nonnegative
-  standard-form variables before simplex.
-- Primal-feasible starting basis after preprocessing (every transformed
-  row rhs is `≥ 0`).
-
-Anything outside that — equality rows, ranged constraints, or negative
-right-hand sides after preprocessing — is rejected with a structured
-`SolveError.bridge` carrying an actionable message. Coverage will grow
-incrementally; two-phase / Big-M is the next step.
+- Row shapes — `(none, some hi)`, `(some lo, none)`, `(some lo, some hi)`
+  (equality or proper range), `(none, none)` — preprocessed into upper-only
+  rows.
+- Column shapes — free, lower-bounded, upper-only, boxed, negative-lower —
+  preprocessed into nonnegative standard-form variables.
+- `SolveStatus.optimal`, `SolveStatus.unbounded` (with recession ray),
+  and `SolveStatus.infeasible` (with Farkas dual read off phase 1's
+  final tableau).
 
 Maximisation is handled by canonicalising to minimisation. The
 certificate is against the canonical (min) problem, matching
 `Soplex.Verify.IsOptimal`. `Solution.objective` is restored to
 the caller's original sense.
+
+Performance is expected to be poor — this is a dense `Rat` tableau,
+no presolve, no sparse data structures. Use the FFI backend in
+production; this backend is for CI lanes, demos, and downstream
+projects that want `by lp` working with a single `import`.
 
 ## Layout
 
@@ -67,6 +72,7 @@ LPBackendPure/
   Simplex.lean             # primal simplex on Rat with Bland's rule
 LPBackendPureTest/
   Simplex.lean             # behavioral tests; re-verifies certificates
+  LPParity.lean            # `by lp` parity sweep against SoplexTest/LP.lean
   Runner.lean              # `lake test` entry point
 ```
 

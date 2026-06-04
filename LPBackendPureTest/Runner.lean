@@ -4,6 +4,7 @@
 -/
 
 import LPBackendPureTest.Simplex
+import LPBackendPureTest.LPParity
 
 def main : IO UInt32 :=
   LPBackendPureTest.Simplex.main

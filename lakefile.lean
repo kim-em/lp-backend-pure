@@ -37,7 +37,7 @@ lean_lib LPBackendPure where
 /-- Behavioral tests for the simplex. Build via
     `lake build LPBackendPureTest` or run via `lake test`. -/
 lean_lib LPBackendPureTest where
-  roots := #[`LPBackendPureTest.Simplex, `LPBackendPureTest.Runner]
+  roots := #[`LPBackendPureTest.Simplex, `LPBackendPureTest.LPParity, `LPBackendPureTest.Runner]
 
 lean_exe «simplex-tests» where
   root := `LPBackendPureTest.Simplex
