@@ -40,17 +40,18 @@ example (a b : Rat) (_ : 2 * a + b ≤ 5) (_ : a - b ≤ 1) :
 The backend runs a tableau-based primal simplex on `Rat` with
 Bland's anti-cycling rule, and the produced certificates re-verify
 under [`kim-em/lp-verify`](https://github.com/kim-em/lp-verify).
-The first-cut scope is deliberately tiny:
+The first-cut scope is still deliberately small:
 
-- Inequality form only (every row is `(none, some hi)`).
-- Non-negative variables only (every column is `(some 0, none)`).
-- Primal-feasible starting basis only (every `hi ≥ 0`).
+- Upper-only rows (every row is `(none, some hi)`).
+- Arbitrary column-bound shapes, preprocessed into nonnegative
+  standard-form variables before simplex.
+- Primal-feasible starting basis after preprocessing (every transformed
+  row rhs is `≥ 0`).
 
-Anything outside that — equality rows, ranged constraints, free
-or upper-bounded columns, negative right-hand sides — is rejected
-with a structured `SolveError.bridge` carrying an actionable
-message. Coverage will grow incrementally; two-phase / Big-M is
-the next step.
+Anything outside that — equality rows, ranged constraints, or negative
+right-hand sides after preprocessing — is rejected with a structured
+`SolveError.bridge` carrying an actionable message. Coverage will grow
+incrementally; two-phase / Big-M is the next step.
 
 Maximisation is handled by canonicalising to minimisation. The
 certificate is against the canonical (min) problem, matching

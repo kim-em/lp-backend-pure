@@ -12,6 +12,7 @@
 -/
 
 import LPBackendPure
+import LPTactic
 import LPVerify
 
 namespace LPBackendPureTest.Simplex
@@ -33,6 +34,24 @@ private def mkLE (m n : Nat) (c : List Rat) (a : List (Nat × Nat × Rat))
     Vector.ofFn (fun i => (none, some ((b[i.val]?).getD 0)))
   let cb : Vector (Option Rat × Option Rat) n :=
     Vector.replicate n (some 0, none)
+  { c := cVec, objOffset := 0, a := aArr,
+    rowBounds := rb, colBounds := cb }
+
+/-- Construct a problem with caller-provided column bounds and
+    upper-only rows. -/
+private def mkLEWithCols (m n : Nat) (c : List Rat) (a : List (Nat × Nat × Rat))
+    (b : List Rat) (cols : List (Option Rat × Option Rat)) : Problem m n :=
+  let cVec : Vector Rat n :=
+    Vector.ofFn (fun j => (c[j.val]?).getD 0)
+  let aArr : Array (Fin m × Fin n × Rat) :=
+    a.toArray.filterMap fun (r, k, v) =>
+      if hr : r < m then
+        if hk : k < n then some (⟨r, hr⟩, ⟨k, hk⟩, v) else none
+      else none
+  let rb : Vector (Option Rat × Option Rat) m :=
+    Vector.ofFn (fun i => (none, some ((b[i.val]?).getD 0)))
+  let cb : Vector (Option Rat × Option Rat) n :=
+    Vector.ofFn (fun j => (cols[j.val]?).getD (some 0, none))
   { c := cVec, objOffset := 0, a := aArr,
     rowBounds := rb, colBounds := cb }
 
@@ -115,18 +134,32 @@ private def case_iterLimitJustEnough : IO Unit :=
   runCase "min -x ≤ 5, iterLimit=1" { iterLimit := some 1 }
     (mkLE 1 1 [-1] [(0,0,1)] [5]) .optimal (some (-5))
 
--- Out-of-scope: column with `(some 0, some 1)` (boxed). Must
--- report `SolveError.bridge`, not a wrong answer.
-private def case_outOfScope : IO Unit := do
-  let p : Problem 1 1 := {
-    c := Vector.ofFn (fun _ => (1 : Rat))
-    a := #[Problem.entry 0 0 1]
-    rowBounds := Vector.ofFn (fun _ => (none, some (5 : Rat)))
-    colBounds := Vector.ofFn (fun _ => (some (0 : Rat), some 1)) }
-  match Backend.Pure.Simplex.solve {} p with
-  | .error (.bridge _) => pure ()
-  | r => throw (IO.userError
-      s!"[out-of-scope] expected bridge error, got {repr r}")
+-- Free column: min -x s.t. x ≤ 3, -x ≤ 2, x free → x=3.
+private def case_freeColumn : IO Unit :=
+  runCase "free column" {}
+    (mkLEWithCols 2 1 [-1] [(0,0,1),(1,0,-1)] [3, 2] [(none, none)])
+    .optimal (some (-3))
+
+-- Negative lower: min -x s.t. x ≤ 4, -2 ≤ x → x=4.
+private def case_negativeLowerColumn : IO Unit :=
+  runCase "negative-lower column" {}
+    (mkLEWithCols 1 1 [-1] [(0,0,1)] [4] [(some (-2), none)])
+    .optimal (some (-4))
+
+-- Upper-only: min x s.t. -x ≤ 3, x ≤ 2 → x=-3.
+private def case_upperOnlyColumn : IO Unit :=
+  runCase "upper-only column" {}
+    (mkLEWithCols 1 1 [1] [(0,0,-1)] [3] [(none, some 2)])
+    .optimal (some (-3))
+
+-- Boxed: min -x s.t. 0 ≤ x ≤ 2 → x=2.
+private def case_boxedColumn : IO Unit :=
+  runCase "boxed column" {}
+    (mkLEWithCols 0 1 [-1] [] [] [(some 0, some 2)])
+    .optimal (some (-2))
+
+example (a b : Rat) (h₁ : 2*a + b ≤ 5) (h₂ : a - b ≤ 1) : 3*a ≤ 6 := by
+  lp
 
 def main : IO UInt32 := do
   try
@@ -138,7 +171,10 @@ def main : IO UInt32 := do
     case_degenerate
     case_classic
     case_iterLimitJustEnough
-    case_outOfScope
+    case_freeColumn
+    case_negativeLowerColumn
+    case_upperOnlyColumn
+    case_boxedColumn
     IO.println "all simplex tests passed"
     pure 0
   catch e =>

@@ -30,8 +30,9 @@ def probe : IO (Except String Unit) :=
 /-- Pure-Lean LP solve. Dispatches to `LPBackendPure.Simplex.solve`,
     which runs a tableau-based primal simplex on `Rat` with Bland's
     anti-cycling rule. See `LPBackendPure/Simplex.lean` for the
-    accepted first-cut scope (inequality form, non-negative
-    variables, primal-feasible starting basis). -/
+    accepted first-cut scope (upper-only rows, arbitrary column
+    bounds via preprocessing, primal-feasible starting basis after
+    preprocessing). -/
 def solveExact {m n : Nat} (opts : Options) (p : Problem m n) :
     IO (Except SolveError (Solution m n)) :=
   pure (Simplex.solve opts p)

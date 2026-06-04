@@ -14,11 +14,16 @@
   considerably simpler to get correct; on toy LPs (the only use
   case for the zero-deps backend) the difference is negligible.
 
-  Scope of this first cut (rejected with `SolveError.bridge` otherwise):
+  Scope of the simplex core (rejected with `SolveError.bridge` otherwise):
   * Inequality form only: every row must be `(none, some hi)`.
   * Non-negative variables only: every column must be `(some 0, none)`.
   * Primal-feasible starting basis: every `hi ≥ 0` so the slack basis
     is feasible at `x = 0`. (No two-phase / Big-M yet.)
+
+  The public solver accepts every column-bound shape by first
+  preprocessing columns into that core form: free variables are split,
+  lower bounds are shifted, upper-only bounds are flipped, and boxed
+  variables get an added upper-bound row.
 
   Maximisation is handled by canonicalising to minimisation
   (`Soplex.canonicalize`) before solving — the resulting certificate
@@ -264,10 +269,209 @@ private def dotArr (xs ys : Array Rat) : Rat := Id.run do
     acc := acc + xs[i]! * ys[i]!
   pure acc
 
+/-! ## Column-bound preprocessing. -/
+
+private inductive ColMap where
+  | lower (col : Nat)
+  | upperFlip (col : Nat)
+  | free (pos neg : Nat)
+  | boxed (col row : Nat)
+  deriving Inhabited
+
+private structure Preprocessed (m n : Nat) where
+  m'       : Nat
+  n'       : Nat
+  problem  : Problem m' n'
+  colMap   : Array ColMap
+
+private def addEntry (entries : Array (Nat × Nat × Rat)) (row col : Nat)
+    (value : Rat) : Array (Nat × Nat × Rat) :=
+  if value = 0 then entries else entries.push (row, col, value)
+
+private def sparseEntries (m' n' : Nat)
+    (raw : Array (Nat × Nat × Rat)) : Array (Fin m' × Fin n' × Rat) :=
+  raw.filterMap fun (r, c, v) =>
+    if hr : r < m' then
+      if hc : c < n' then some (⟨r, hr⟩, ⟨c, hc⟩, v) else none
+    else none
+
+private def colCoeff (maps : Array ColMap) (j k : Nat) : Rat :=
+  match maps[j]! with
+  | .lower col      => if k = col then 1 else 0
+  | .upperFlip col  => if k = col then -1 else 0
+  | .free pos neg   => if k = pos then 1 else if k = neg then -1 else 0
+  | .boxed col _    => if k = col then 1 else 0
+
+private def colShift (bounds : Array (Option Rat × Option Rat)) (j : Nat) : Rat :=
+  match bounds[j]! with
+  | (some lo, _) => lo
+  | (none, some hi) => hi
+  | (none, none) => 0
+
+private def preprocess {m n : Nat} (p : Problem m n) :
+    Except ScopeError (Preprocessed m n) := do
+  for i in [:m] do
+    match p.rowBounds.toArray[i]! with
+    | (none, some _) => pure ()
+    | _ => throw (.rowNotUpperOnly i)
+
+  let colBounds := p.colBounds.toArray
+  let mut maps : Array ColMap := #[]
+  let mut cRaw : Array Rat := #[]
+  let mut shift : Array Rat := #[]
+  let mut addedRows : Array (Nat × Nat × Rat) := #[]
+  let mut nextCol : Nat := 0
+  let mut nextExtraRow : Nat := 0
+
+  for j in [:n] do
+    let cj := p.c.toArray[j]!
+    match colBounds[j]! with
+    | (some lo, none) =>
+        let col := nextCol
+        nextCol := nextCol + 1
+        maps := maps.push (.lower col)
+        cRaw := cRaw.push cj
+        shift := shift.push lo
+    | (none, some hi) =>
+        let col := nextCol
+        nextCol := nextCol + 1
+        maps := maps.push (.upperFlip col)
+        cRaw := cRaw.push (-cj)
+        shift := shift.push hi
+    | (none, none) =>
+        let pos := nextCol
+        let neg := nextCol + 1
+        nextCol := nextCol + 2
+        maps := maps.push (.free pos neg)
+        cRaw := cRaw.push cj
+        cRaw := cRaw.push (-cj)
+        shift := shift.push 0
+    | (some lo, some hi) =>
+        let col := nextCol
+        let row := m + nextExtraRow
+        nextCol := nextCol + 1
+        nextExtraRow := nextExtraRow + 1
+        maps := maps.push (.boxed col row)
+        cRaw := cRaw.push cj
+        shift := shift.push lo
+        addedRows := addedRows.push (row, col, hi - lo)
+
+  let m' := m + nextExtraRow
+  let n' := nextCol
+  let mut rowShift : Array Rat := Array.replicate m 0
+  let mut entries : Array (Nat × Nat × Rat) := #[]
+  for entry in p.a do
+    let (r, c, v) := entry
+    let i := r.val
+    let j := c.val
+    rowShift := rowShift.set! i (rowShift[i]! + v * shift[j]!)
+    match maps[j]! with
+    | .lower col | .upperFlip col | .boxed col _ =>
+        entries := addEntry entries i col (v * colCoeff maps j col)
+    | .free pos neg =>
+        entries := addEntry entries i pos v
+        entries := addEntry entries i neg (-v)
+
+  for added in addedRows do
+    let (row, col, _) := added
+    entries := addEntry entries row col 1
+
+  let cVec : Vector Rat n' := Vector.ofFn (fun j => cRaw[j.val]!)
+  let objOffset := p.objOffset + dotArr p.c.toArray shift
+  let rb : Vector (Option Rat × Option Rat) m' := Vector.ofFn fun i =>
+    if i.val < m then
+      let hi := (p.rowBounds.toArray[i.val]!).2.getD 0
+      (none, some (hi - rowShift[i.val]!))
+    else
+      let extra := i.val - m
+      let rhs := addedRows[extra]!.2.2
+      (none, some rhs)
+  let cb : Vector (Option Rat × Option Rat) n' :=
+    Vector.replicate n' (some (0 : Rat), none)
+  let p' : Problem m' n' :=
+    { c := cVec
+      objOffset := objOffset
+      a := sparseEntries m' n' entries
+      rowBounds := rb
+      colBounds := cb }
+  pure { m' := m', n' := n', problem := p', colMap := maps }
+
+private def translatePrimal (maps : Array ColMap) (bounds : Array (Option Rat × Option Rat))
+    (y : Array Rat) : Array Rat := Id.run do
+  let mut x : Array Rat := Array.mkEmpty maps.size
+  for j in [:maps.size] do
+    let value :=
+      match maps[j]! with
+      | .lower col      => colShift bounds j + y[col]!
+      | .upperFlip col  => colShift bounds j - y[col]!
+      | .free pos neg   => y[pos]! - y[neg]!
+      | .boxed col _    => colShift bounds j + y[col]!
+    x := x.push value
+  pure x
+
+private def translateRay (maps : Array ColMap) (r : Array Rat) : Array Rat := Id.run do
+  let mut x : Array Rat := Array.mkEmpty maps.size
+  for j in [:maps.size] do
+    let value :=
+      match maps[j]! with
+      | .lower col      => r[col]!
+      | .upperFlip col  => -r[col]!
+      | .free pos neg   => r[pos]! - r[neg]!
+      | .boxed col _    => r[col]!
+    x := x.push value
+  pure x
+
+private def translateDual {m n m' n' : Nat} (pp : Preprocessed m n)
+    (d : DualBundle m' n') : DualBundle m n :=
+  let rowLower : Vector Rat m := zeroVec m
+  let rowUpper : Vector Rat m := Vector.ofFn (fun i => d.rowUpper.toArray[i.val]!)
+  let colLower : Vector Rat n := Vector.ofFn fun j =>
+    match pp.colMap[j.val]! with
+    | .lower col | .boxed col _ => d.colLower.toArray[col]!
+    | .upperFlip _ | .free _ _  => 0
+  let colUpper : Vector Rat n := Vector.ofFn fun j =>
+    match pp.colMap[j.val]! with
+    | .upperFlip col => d.colLower.toArray[col]!
+    | .boxed _ row   => d.rowUpper.toArray[row]!
+    | .lower _ | .free _ _ => 0
+  { rowLower := rowLower
+    rowUpper := rowUpper
+    colLower := colLower
+    colUpper := colUpper }
+
+private def translateSolution {m n : Nat} (p : Problem m n)
+    (pp : Preprocessed m n) (sol : Solution pp.m' pp.n') : Solution m n :=
+  match sol.status with
+  | .optimal =>
+      match sol.certificate.primal, sol.certificate.dual with
+      | some y, some d =>
+          let xArr := translatePrimal pp.colMap p.colBounds.toArray y.toArray
+          let dual := translateDual pp d
+          { status      := .optimal
+            objective   := some (dotArr p.c.toArray xArr + p.objOffset)
+            certificate := { primal := some (toVec xArr n), dual := some dual, ray := none }
+            log         := sol.log }
+      | _, _ => { sol with certificate := default }
+  | .unbounded =>
+      match sol.certificate.primal, sol.certificate.ray with
+      | some y, some r =>
+          let xArr := translatePrimal pp.colMap p.colBounds.toArray y.toArray
+          let rArr := translateRay pp.colMap r.toArray
+          { status      := .unbounded
+            objective   := none
+            certificate := { primal := some (toVec xArr n), dual := none, ray := some (toVec rArr n) }
+            log         := sol.log }
+      | _, _ => { sol with certificate := default }
+  | _ =>
+      { status      := sol.status
+        objective   := sol.objective
+        certificate := default
+        log         := sol.log }
+
 /-! ## Public entry point. -/
 
-/-- Solve a min-form problem and produce a certificate against it. -/
-private def solveCanon {m n : Nat} (p : Problem m n) (fuel : Nat) :
+/-- Solve a min-form standard problem and produce a certificate against it. -/
+private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
     Except SolveError (Solution m n) :=
   match checkScope p with
   | .error e => .error (.bridge e.toMsg)
@@ -307,6 +511,16 @@ private def solveCanon {m n : Nat} (p : Problem m n) (fuel : Nat) :
             objective   := none
             certificate := cert
             log         := "" }
+
+/-- Solve a min-form problem and produce a certificate against it. -/
+private def solveCanon {m n : Nat} (p : Problem m n) (fuel : Nat) :
+    Except SolveError (Solution m n) :=
+  match preprocess p with
+  | .error e => .error (.bridge e.toMsg)
+  | .ok pp =>
+      match solveStandard pp.problem fuel with
+      | .error e => .error e
+      | .ok sol => .ok (translateSolution p pp sol)
 
 /-- Pure-Lean simplex driver. Canonicalises to minimisation,
     solves, and restores the caller's original sense in
