@@ -17,7 +17,7 @@ import LPVerify
 
 namespace LPBackendPureTest.Simplex
 
-open Soplex Soplex.Verify
+open LP LP.Verify
 
 /-- Construct a `Problem` in this backend's first-cut scope:
     `c·x` objective, sparse `A`, `Ax ≤ b`, `x ≥ 0`. -/

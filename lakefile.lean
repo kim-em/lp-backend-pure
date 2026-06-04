@@ -14,18 +14,18 @@ open Lake DSL
   `by lp` working with a single `import` and zero install steps.
 -/
 
-require LPCore from git "https://github.com/kim-em/lp-core" @
-  "66ac782a11ba2f8c2d3b4ad446000cf20b3f39b7"
+require LPCore from git "https://github.com/leanprover/lp-core" @
+  "70ca150585f8439a830374b5bec602d391addbc9"
 
-require LPTactic from git "https://github.com/kim-em/lp-tactic" @
-  "809fd8a09506213e50b6198dd6261166f4d78b54"
+require LPTactic from git "https://github.com/leanprover/lp-tactic" @
+  "3f1309f8f3cda3c1f67a0af70eb68eb5836f38fa"
 
 -- `LPVerify` is only used by the test suite (to re-check
 -- certificates the backend produces). It is reachable transitively
 -- through `LPTactic`'s lake-manifest, but listing it explicitly
 -- keeps the test target's intent obvious.
-require LPVerify from git "https://github.com/kim-em/lp-verify" @
-  "e11fa03103dea73fa238c86522018a7267b824c2"
+require LPVerify from git "https://github.com/leanprover/lp-verify" @
+  "e8e337f4b6c6f666b5dc7b43bc1ae6cc9d15fa05"
 
 package LPBackendPure
 

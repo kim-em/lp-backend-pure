@@ -1,7 +1,7 @@
 /-
   Parity tests for the `by lp` tactic against the pure-Lean
-  backend. Each `example` below mirrors one in `kim-em/soplex`'s
-  `SoplexTest/LP.lean`; this file rebuilds them with only
+  backend. Each `example` below mirrors one in `leanprover/lp`'s
+  `LPTest/LP.lean`; this file rebuilds them with only
   `LPBackendPure` registered, so a successful compilation proves
   the pure backend handles each case without falling through to
   `SolveError.bridge`.
@@ -15,7 +15,7 @@
 
   This is the file that closes the tracking issue for
   `LPBackendSoplexFFI` ↔ `LPBackendPure` feature parity. If a new
-  case lands in `SoplexTest/LP.lean`, it should also land here.
+  case lands in `LPTest/LP.lean`, it should also land here.
 -/
 
 import LPBackendPure

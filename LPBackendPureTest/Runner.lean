@@ -1,5 +1,5 @@
 /-
-  `lake test` entry point for `kim-em/lp-backend-pure`. Runs every
+  `lake test` entry point for `leanprover/lp-backend-pure`. Runs every
   test suite in the package; today just `LPBackendPureTest.Simplex`.
 -/
 

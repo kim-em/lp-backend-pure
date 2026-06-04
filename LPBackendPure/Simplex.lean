@@ -49,7 +49,7 @@
   `(rowLower, rowUpper)` split by `translateDual`.
 
   Maximisation is handled by canonicalising to minimisation
-  (`Soplex.canonicalize`) before solving — the resulting certificate
+  (`LP.canonicalize`) before solving — the resulting certificate
   is for the canonical (min) form, which matches the verifier's
   `IsOptimal` definition. The user-facing `Solution.objective` is
   restored to the caller's original sense by negation.
@@ -62,9 +62,9 @@
 
 import LPCore
 
-namespace Soplex.Backend.Pure
+namespace LP.Backend.Pure
 
-open Soplex
+open LP
 
 namespace Simplex
 
@@ -81,7 +81,7 @@ private def ScopeError.toMsg : ScopeError → String
   | .rowNotUpperOnly i =>
       s!"pure-Lean backend: row {i} is outside scope " ++
       "(expected `none ≤ Ax ≤ some hi`); see " ++
-      "kim-em/lp-backend-pure `LPBackendPure/Simplex.lean`"
+      "leanprover/lp-backend-pure `LPBackendPure/Simplex.lean`"
   | .colNotNonNegOnly j =>
       s!"pure-Lean backend: column {j} is outside scope " ++
       "(expected `some 0 ≤ x ≤ none`)"
@@ -891,7 +891,7 @@ private def solveCanon {m n : Nat} (p : Problem m n) (fuel : Nat) :
 /-- Pure-Lean simplex driver. Canonicalises to minimisation,
     solves, and restores the caller's original sense in
     `Solution.objective`. The certificate is against the
-    canonical (min) problem, matching `Soplex.Verify.IsOptimal`. -/
+    canonical (min) problem, matching `LP.Verify.IsOptimal`. -/
 def solve {m n : Nat} (opts : Options) (p : Problem m n) :
     Except SolveError (Solution m n) :=
   let pCanon := canonicalize opts.sense p
@@ -907,4 +907,4 @@ def solve {m n : Nat} (opts : Options) (p : Problem m n) :
 
 end Simplex
 
-end Soplex.Backend.Pure
+end LP.Backend.Pure

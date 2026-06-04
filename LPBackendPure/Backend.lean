@@ -17,9 +17,9 @@ import LPCore
 import LPTactic.Registry
 import LPBackendPure.Simplex
 
-namespace Soplex.Backend.Pure
+namespace LP.Backend.Pure
 
-open Soplex Soplex.LP
+open LP
 
 /-- Pure-Lean backend probe: nothing to check, no external state.
     The probe always succeeds; the LP solve itself may still fail
@@ -46,4 +46,4 @@ def backend : LPBackend where
 
 initialize registerBackend backend
 
-end Soplex.Backend.Pure
+end LP.Backend.Pure

@@ -12,7 +12,7 @@ import LPBackendPure
 
 namespace LPBackendPureTest.Bench
 
-open Soplex
+open LP
 
 /-- Tiny deterministic LCG so we don't pull in a randomness dep. -/
 private structure Rng where
