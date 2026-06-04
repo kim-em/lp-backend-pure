@@ -17,6 +17,8 @@
   Scope of the simplex core (rejected with `SolveError.bridge` otherwise):
   * Inequality form only: every row must be `(none, some hi)`.
   * Non-negative variables only: every column must be `(some 0, none)`.
+  The public `solve` entry point accepts every row/column shape and
+  preprocesses into this core form before calling `solveStandard`.
 
   Rows whose `hi < 0` are handled by a phase 1 / phase 2 startup:
   each negative-rhs row is sign-flipped (so the rhs becomes `|hi|`)
