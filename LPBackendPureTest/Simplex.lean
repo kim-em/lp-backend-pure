@@ -267,6 +267,69 @@ private def case_equalityInfeasible : IO Unit :=
       [(some 2, some 2), (none, some 1)] [(some 0, none)])
     .infeasible none
 
+-- Issue #12: when `simplexLoop` runs out of fuel, the result should
+-- include a usable partial primal (read off the current basis), the
+-- pivot count, and a short diagnostic log — not the bare `Inhabited`
+-- default. `min -x s.t. x ≤ 5, x ≥ 0` needs exactly one pivot; with
+-- `iterLimit = 0` the loop returns `.iterLimit` after burning zero
+-- pivots and the partial primal should be `x = 0` (the slack basis).
+private def case_iterLimitPhase2Partial : IO Unit := do
+  let opts : Options := { iterLimit := some 0 }
+  let p := mkLE 1 1 [-1] [(0,0,1)] [5]
+  match Backend.Pure.Simplex.solve opts p with
+  | .error e => throw (IO.userError s!"[iterLimit phase2] solve error: {repr e}")
+  | .ok sol =>
+      assertM (sol.status = .iterLimit)
+        s!"[iterLimit phase2] status: got {repr sol.status}, want iterLimit"
+      match sol.certificate.primal with
+      | none   => throw (IO.userError "[iterLimit phase2] expected partial primal, got none")
+      | some x =>
+          assertM (x.toArray = #[0])
+            s!"[iterLimit phase2] partial primal: got {repr x.toArray}, want #[0]"
+      assertM (sol.log.startsWith "iteration limit reached")
+        s!"[iterLimit phase2] log: got {repr sol.log}"
+      assertM (sol.log.endsWith "0 simplex pivot(s)")
+        s!"[iterLimit phase2] log should mention pivot count: got {repr sol.log}"
+
+-- Phase 1 iterLimit: `min x s.t. -x+y ≤ -1, x, y ≥ 0` triggers a
+-- phase-1 startup. With `iterLimit = 0`, phase 1 stops before any
+-- pivot and the partial primal is the (infeasible) starting point.
+-- The log should attribute the stop to phase 1.
+private def case_iterLimitPhase1Partial : IO Unit := do
+  let opts : Options := { iterLimit := some 0 }
+  let p := mkLE 1 2 [1, 0] [(0,0,-1),(0,1,1)] [-1]
+  match Backend.Pure.Simplex.solve opts p with
+  | .error e => throw (IO.userError s!"[iterLimit phase1] solve error: {repr e}")
+  | .ok sol =>
+      assertM (sol.status = .iterLimit)
+        s!"[iterLimit phase1] status: got {repr sol.status}, want iterLimit"
+      assertM sol.certificate.primal.isSome
+        "[iterLimit phase1] expected partial primal, got none"
+      assertM (sol.log = "iteration limit reached during phase 1 after 0 simplex pivot(s)")
+        s!"[iterLimit phase1] log: got {repr sol.log}"
+
+-- Phase 1 iterLimit with a nontrivial column map: `min 0 s.t. -x ≤
+-- -1` with `x` free. Preprocessing splits `x` into `x⁺ - x⁻` (so
+-- `pp.n' = 2`), and the negative rhs forces a phase 1 startup. With
+-- `iterLimit = 0`, the partial primal is in the *preprocessed* `2`-vector
+-- space; `translateSolution` must map it back through `pp.colMap`
+-- and return a primal of length `1` (the original `n`).
+private def case_iterLimitTranslatesDimensions : IO Unit := do
+  let opts : Options := { iterLimit := some 0 }
+  let p := mkLEWithCols 1 1 [0] [(0,0,-1)] [-1] [(none, none)]
+  match Backend.Pure.Simplex.solve opts p with
+  | .error e =>
+      throw (IO.userError s!"[iterLimit translate] solve error: {repr e}")
+  | .ok sol =>
+      assertM (sol.status = .iterLimit)
+        s!"[iterLimit translate] status: got {repr sol.status}, want iterLimit"
+      match sol.certificate.primal with
+      | none   =>
+          throw (IO.userError "[iterLimit translate] expected partial primal, got none")
+      | some x =>
+          assertM (x.toArray.size = 1)
+            s!"[iterLimit translate] primal length: got {x.toArray.size}, want 1 (original n)"
+
 -- Equality on a free variable: `x = 5` with `x` free, minimise `0` →
 -- x = 5. Exercises the row equality split together with the free-column
 -- split.
@@ -301,6 +364,9 @@ def main : IO UInt32 := do
     case_degenerate
     case_classic
     case_iterLimitJustEnough
+    case_iterLimitPhase2Partial
+    case_iterLimitPhase1Partial
+    case_iterLimitTranslatesDimensions
     case_freeColumn
     case_negativeLowerColumn
     case_upperOnlyColumn
