@@ -8,15 +8,10 @@
 
   Most cases exercise backend code paths (multi-row LPs, ranged
   hypotheses, infeasible Farkas, unbounded ray). A few (closed
-  scalar short-circuits, locally `let`-bound scalar) live entirely
-  in the tactic and are kept here so the parity sweep tracks
-  upstream tactic coverage too.
-
-  Two `SoplexTest/LP.lean` examples (`: False` and `(p : Prop) : p`
-  from contradictory hypotheses) are intentionally omitted: the
-  pinned `LPTactic` (`f6a72b7`) rejects them before backend
-  dispatch with "lp: goal is not an atomic Rat comparison". When
-  the pin moves, they should be added.
+  scalar short-circuits, locally `let`-bound scalar, bare `False`
+  / `Prop` from contradictory hypotheses) live entirely in the
+  tactic and are kept here so the parity sweep tracks upstream
+  tactic coverage too.
 
   This is the file that closes the tracking issue for
   `LPBackendSoplexFFI` ↔ `LPBackendPure` feature parity. If a new
@@ -62,6 +57,11 @@ example (a : Rat) (_h : a ≤ 0 ∧ 0 ≤ a) : a = 0 := by lp
 /-! ## Inconsistent hypotheses (Farkas-dual path). -/
 
 example (x : Rat) (_h₁ : x ≤ 0) (_h₂ : 1 ≤ x) : x = 5 := by lp
+
+-- Bare `False` goal closes from an inconsistent `Rat` hypothesis system; the
+-- carrier is read from the hypotheses since the goal carries none.
+example (a : Rat) (_h₁ : a ≤ 1) (_h₂ : 3 ≤ a) : False := by lp
+example (p : Prop) (a : Rat) (_h₁ : a ≤ 1) (_h₂ : 3 ≤ a) : p := by lp
 
 /-! ## Unbounded objective: the pure backend produces the same
     `base=[0], ray=[1]` certificate as the FFI backend. -/
