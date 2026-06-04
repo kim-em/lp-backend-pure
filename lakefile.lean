@@ -18,7 +18,7 @@ require LPCore from git "https://github.com/leanprover/lp-core" @
   "70ca150585f8439a830374b5bec602d391addbc9"
 
 require LPTactic from git "https://github.com/leanprover/lp-tactic" @
-  "3f1309f8f3cda3c1f67a0af70eb68eb5836f38fa"
+  "7ea556ad4d2bbd8d9d3e790cfb05206bd7f24d91"
 
 -- `LPVerify` is only used by the test suite (to re-check
 -- certificates the backend produces). It is reachable transitively
