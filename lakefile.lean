@@ -15,17 +15,17 @@ open Lake DSL
 -/
 
 require LPCore from git "https://github.com/kim-em/lp-core" @
-  "98669eee0fe05bcc1ed9aa2c7c7adff5d1aaf9ae"
+  "66ac782a11ba2f8c2d3b4ad446000cf20b3f39b7"
 
 require LPTactic from git "https://github.com/kim-em/lp-tactic" @
-  "f6a72b7f7df1609571e79b4ff6333b72794a4df5"
+  "809fd8a09506213e50b6198dd6261166f4d78b54"
 
 -- `LPVerify` is only used by the test suite (to re-check
 -- certificates the backend produces). It is reachable transitively
 -- through `LPTactic`'s lake-manifest, but listing it explicitly
 -- keeps the test target's intent obvious.
 require LPVerify from git "https://github.com/kim-em/lp-verify" @
-  "3ff2a91582ed8b460021698804266cafbfda0aa5"
+  "e11fa03103dea73fa238c86522018a7267b824c2"
 
 package LPBackendPure
 
