@@ -87,6 +87,13 @@ private def runCase {m n : Nat} (label : String) (opts : Options)
                 s!"[{label}] checkUnbounded rejected the certificate"
           | _, _ =>
               throw (IO.userError s!"[{label}] unbounded but missing primal/ray")
+      | .infeasible =>
+          match sol.certificate.dual with
+          | some d =>
+              assertM (checkInfeasible pCanon d)
+                s!"[{label}] checkInfeasible rejected the Farkas certificate"
+          | none =>
+              throw (IO.userError s!"[{label}] infeasible but missing dual")
       | s =>
           throw (IO.userError s!"[{label}] unexpected status {repr s}")
 
@@ -158,8 +165,49 @@ private def case_boxedColumn : IO Unit :=
     (mkLEWithCols 0 1 [-1] [] [] [(some 0, some 2)])
     .optimal (some (-2))
 
+-- Two-phase startup: `-x + y ≤ -1` with `x, y ≥ 0` is feasible
+-- (only at `x ≥ 1`); minimising `x` is the textbook two-phase
+-- example. The slack basis has `s = -1 < 0`, so phase 1 has to
+-- drive an artificial to 0 before phase 2 finds `x = 1, y = 0`.
+private def case_twoPhaseFeasible : IO Unit :=
+  runCase "min x s.t. -x+y ≤ -1" {}
+    (mkLE 1 2 [1, 0] [(0,0,-1),(0,1,1)] [-1]) .optimal (some 1)
+
+-- Two-phase startup with two flipped rows: minimise `x + y` subject
+-- to `-x - y ≤ -3` and `-x ≤ -1` (i.e., `x + y ≥ 3, x ≥ 1`). Both
+-- rows are negative-rhs, so phase 1 adds two artificials and drives
+-- both to zero before phase 2 finds `x = 3, y = 0` with obj = 3.
+private def case_twoPhaseMultiFlip : IO Unit :=
+  runCase "min x+y, two negative-rhs rows" {}
+    (mkLE 2 2 [1, 1] [(0,0,-1),(0,1,-1),(1,0,-1)] [-3, -1])
+    .optimal (some 3)
+
+-- Genuinely infeasible: `x ≤ 0 ∧ -x ≤ -1` with `x ≥ 0`. No feasible
+-- `x`. Phase 1's optimum is strictly positive, so the backend must
+-- return `SolveStatus.infeasible` with a Farkas dual `y ≥ 0` such
+-- that `Aᵀy ≥ 0` and `bᵀy < 0`. `LPVerify.checkInfeasible` re-checks.
+private def case_infeasibleSimple : IO Unit :=
+  runCase "infeasible: x ≤ 0 ∧ -x ≤ -1" {}
+    (mkLE 2 1 [0] [(0,0,1),(1,0,-1)] [0, -1]) .infeasible none
+
+-- The example from issue #5: `x ≤ 0 ∧ 1 ≤ x` for a free `x`,
+-- exercising both the column-bound preprocessing (free column splits
+-- to `x⁺ - x⁻`) and the two-flipped-row infeasibility path. The
+-- Farkas dual that comes back is the one the `lp` tactic threads into
+-- `direct_infeasible_close`.
+private def case_infeasibleFreeVar : IO Unit :=
+  runCase "infeasible: x ≤ 0 ∧ 1 ≤ x (free x)" {}
+    (mkLEWithCols 2 1 [0] [(0,0,1),(1,0,-1)] [0, -1] [(none, none)])
+    .infeasible none
+
 example (a b : Rat) (h₁ : 2*a + b ≤ 5) (h₂ : a - b ≤ 1) : 3*a ≤ 6 := by
   lp
+
+-- The `lp` tactic's contradictory-hypotheses example from issue #5,
+-- routed end-to-end through the pure-Lean backend's `solveStandard`
+-- (which returns `SolveStatus.infeasible` + Farkas dual on
+-- contradictory hypotheses) and `direct_infeasible_close`.
+example (x : Rat) (h₁ : x ≤ 0) (h₂ : 1 ≤ x) : x = 5 := by lp
 
 def main : IO UInt32 := do
   try
@@ -175,6 +223,10 @@ def main : IO UInt32 := do
     case_negativeLowerColumn
     case_upperOnlyColumn
     case_boxedColumn
+    case_twoPhaseFeasible
+    case_twoPhaseMultiFlip
+    case_infeasibleSimple
+    case_infeasibleFreeVar
     IO.println "all simplex tests passed"
     pure 0
   catch e =>

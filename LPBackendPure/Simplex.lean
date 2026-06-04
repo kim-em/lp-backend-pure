@@ -1,5 +1,5 @@
 /-
-  Pure-Lean primal simplex on `Rat`.
+  Pure-Lean two-phase primal simplex on `Rat`.
 
   This module implements a tableau-based primal simplex with
   Bland's anti-cycling rule. The whole computation runs on `Rat`
@@ -17,8 +17,18 @@
   Scope of the simplex core (rejected with `SolveError.bridge` otherwise):
   * Inequality form only: every row must be `(none, some hi)`.
   * Non-negative variables only: every column must be `(some 0, none)`.
-  * Primal-feasible starting basis: every `hi ≥ 0` so the slack basis
-    is feasible at `x = 0`. (No two-phase / Big-M yet.)
+
+  Rows whose `hi < 0` are handled by a phase 1 / phase 2 startup:
+  each negative-rhs row is sign-flipped (so the rhs becomes `|hi|`)
+  and an artificial variable is added in that row. Phase 1 minimises
+  the sum of the artificials. If phase 1 reaches `0`, the artificial
+  columns are excluded from phase 2's entering choices and we proceed
+  to the standard min-form simplex. If phase 1's optimum is strictly
+  positive, the LP is infeasible and we return `SolveStatus.infeasible`
+  with a Farkas dual read directly off row 0 of the final tableau:
+  `yᵢ = tab[0, n+i]`, `zL[j] = tab[0, j]`. The sign convention matches
+  `LPVerify.checkInfeasible`'s `DualBundle` layout (`rowUpper = y ≥ 0`,
+  `colLower = zL ≥ 0`).
 
   The public solver accepts every column-bound shape by first
   preprocessing columns into that core form: free variables are split,
@@ -47,27 +57,20 @@ namespace Simplex
 
 /-! ## Scope check. -/
 
-/-- Why a problem falls outside this backend's first-cut scope. -/
+/-- Why a problem falls outside this backend's scope. -/
 private inductive ScopeError where
   /-- Row `i` is not of the form `(none, some hi)`. -/
   | rowNotUpperOnly (i : Nat)
-  /-- Row `i` has `hi < 0`; we have no two-phase yet, so the slack
-      basis is infeasible. -/
-  | rowRhsNegative (i : Nat) (rhs : Rat)
   /-- Column `j` is not of the form `(some 0, none)`. -/
   | colNotNonNegOnly (j : Nat)
 
 private def ScopeError.toMsg : ScopeError → String
   | .rowNotUpperOnly i =>
-      s!"pure-Lean backend: row {i} is outside first-cut scope " ++
+      s!"pure-Lean backend: row {i} is outside scope " ++
       "(expected `none ≤ Ax ≤ some hi`); see " ++
       "kim-em/lp-backend-pure `LPBackendPure/Simplex.lean`"
-  | .rowRhsNegative i rhs =>
-      s!"pure-Lean backend: row {i} has rhs {rhs} < 0 " ++
-      "(first-cut requires a primal-feasible slack basis; " ++
-      "two-phase support is not yet implemented)"
   | .colNotNonNegOnly j =>
-      s!"pure-Lean backend: column {j} is outside first-cut scope " ++
+      s!"pure-Lean backend: column {j} is outside scope " ++
       "(expected `some 0 ≤ x ≤ none`)"
 
 /-- Verify the (canonicalised) problem is in the supported scope. -/
@@ -75,8 +78,7 @@ private def checkScope {m n : Nat} (p : Problem m n) :
     Except ScopeError Unit := do
   for i in [:m] do
     match p.rowBounds.toArray[i]! with
-    | (none, some hi) =>
-        if hi < 0 then throw (.rowRhsNegative i hi)
+    | (none, some _) => pure ()
     | _ => throw (.rowNotUpperOnly i)
   for j in [:n] do
     match p.colBounds.toArray[j]! with
@@ -84,14 +86,51 @@ private def checkScope {m n : Nat} (p : Problem m n) :
         if lo ≠ 0 then throw (.colNotNonNegOnly j)
     | _ => throw (.colNotNonNegOnly j)
 
+/-! ## Per-row setup. -/
+
+/-- Per-row info computed up front. A row with `rhs ≥ 0` keeps its
+    sign and uses its slack as the basic variable; a row with `rhs < 0`
+    is multiplied through by `-1` (so the new rhs is `|rhs|`) and an
+    artificial variable is added at column `artCol`, which becomes the
+    basic variable for that row. -/
+private structure RowInfo where
+  /-- Artificial column index for this row, if added (only when
+      `rhs < 0`). -/
+  artCol : Option Nat
+  /-- Row scaling: `-1` for sign-flipped rows, `+1` otherwise. -/
+  sign   : Rat
+  /-- Rhs after row scaling. Always `≥ 0`. -/
+  rhs    : Rat
+  deriving Inhabited
+
+/-- Walk the rows once, decide which need an artificial, and assign
+    column indices. Artificial columns occupy
+    `n + m .. n + m + numArt - 1` in the order rows are visited. -/
+private def computeRowInfos {m n : Nat} (p : Problem m n) :
+    Array RowInfo × Nat := Id.run do
+  let mut infos : Array RowInfo := Array.mkEmpty m
+  let mut numArt := 0
+  for i in [:m] do
+    let hi := (p.rowBounds.toArray[i]!).2.getD 0
+    if hi < 0 then
+      infos := infos.push
+        { artCol := some (n + m + numArt), sign := -1, rhs := -hi }
+      numArt := numArt + 1
+    else
+      infos := infos.push
+        { artCol := none, sign := 1, rhs := hi }
+  pure (infos, numArt)
+
 /-! ## Tableau state. -/
 
 /-- Dense simplex-tableau state.
 
     Columns:
-    * `0 .. n-1`   structural variables;
-    * `n .. n+m-1` slack variables (slack `n+i` matches row `i`);
-    * `n+m`        right-hand side.
+    * `0 .. n-1`           structural variables;
+    * `n .. n+m-1`          slack variables (slack `n+i` matches row `i`);
+    * `n+m .. n+m+k-1`     artificial variables (one per negative-rhs
+                            row, where `k = numArt`);
+    * `n+m+k`              right-hand side.
 
     Rows:
     * `0`          objective / reduced-cost row;
@@ -104,41 +143,100 @@ private structure State where
   basis : Array Nat
   deriving Inhabited
 
-/-- Build the initial slack-basis tableau. Assumes `checkScope`
-    has already accepted the problem. -/
-private def initialState {m n : Nat} (p : Problem m n) : State := Id.run do
-  let totalVars := n + m
+/-- Build the initial constraint rows. The objective row (row 0) is
+    left at zero; callers (`setupPhase1` / `setupPhase2`) fill it in
+    according to which phase is starting. -/
+private def initialState {m n : Nat} (p : Problem m n)
+    (infos : Array RowInfo) (numArt : Nat) : State := Id.run do
+  let totalVars := n + m + numArt
   let colCount := totalVars + 1
   let zeroRow : Array Rat := Array.replicate colCount 0
   let mut tab : Array (Array Rat) := Array.replicate (m + 1) zeroRow
-  -- Objective row: c on structural columns; zeros on slacks and rhs.
-  let mut row0 := zeroRow
+  let mut basis : Array Nat := Array.replicate m 0
+  for i in [:m] do
+    let info := infos[i]!
+    let mut row := zeroRow
+    row := row.set! (n + i) info.sign
+    row := row.set! totalVars info.rhs
+    match info.artCol with
+    | some ac =>
+        row := row.set! ac 1
+        basis := basis.set! i ac
+    | none =>
+        basis := basis.set! i (n + i)
+    tab := tab.set! (i + 1) row
+  -- Sum the sparse `A` entries (scaled by `sign`) into the constraint
+  -- rows. `validate` already deduplicates so the addition is identical
+  -- to overwriting on the intended path; doing it additively keeps the
+  -- semantics the same as `LPVerify.evalAx` for direct callers (e.g.
+  -- tests) that bypass `validate`.
+  for entry in p.a do
+    let (r, c, v) := entry
+    let i := r.val
+    let sign := infos[i]!.sign
+    let row := tab[i + 1]!
+    tab := tab.set! (i + 1) (row.set! c.val (row[c.val]! + sign * v))
+  pure { tab := tab, basis := basis }
+
+/-- Subtract `c * row src` from `row dst` (componentwise). -/
+private def subRow (tab : Array (Array Rat)) (dst src : Nat) (c : Rat)
+    (colCount : Nat) : Array (Array Rat) := Id.run do
+  let mut out := tab
+  let srcRow := out[src]!
+  let mut dstRow := out[dst]!
+  for j in [:colCount] do
+    dstRow := dstRow.set! j (dstRow[j]! - c * srcRow[j]!)
+  out := out.set! dst dstRow
+  pure out
+
+/-- Set up the phase 1 objective row (`1` on each artificial column),
+    then price out by subtracting each artificial-basic constraint row.
+    Has no effect when there are no artificials. -/
+private def setupPhase1 (st : State) (infos : Array RowInfo)
+    (colCount : Nat) : State := Id.run do
+  let m := infos.size
+  let mut tab := st.tab
+  let mut row0 := tab[0]!
+  for i in [:m] do
+    match infos[i]!.artCol with
+    | some ac => row0 := row0.set! ac 1
+    | none    => ()
+  tab := tab.set! 0 row0
+  for i in [:m] do
+    if infos[i]!.artCol.isSome then
+      tab := subRow tab 0 (i + 1) 1 colCount
+  pure { tab := tab, basis := st.basis }
+
+/-- Reset row 0 to the phase 2 objective (`c` on structural columns)
+    and price out the current basis. Artificials get cost `0` so they
+    are locked out of phase 2's `chooseEntering` (which restricts to
+    columns `< n + m`). -/
+private def setupPhase2 {m n : Nat} (st : State) (p : Problem m n)
+    (colCount : Nat) : State := Id.run do
+  let mut tab := st.tab
+  let mut row0 : Array Rat := Array.replicate colCount 0
   for j in [:n] do
     row0 := row0.set! j p.c.toArray[j]!
   tab := tab.set! 0 row0
-  -- Constraint rows: slack identity (1 on column `n+i`) and rhs `hi`.
+  -- Price out: the basic column in row `i+1` is in canonical form
+  -- (`tab[i+1][basis[i]] = 1`), so a single subtraction zeros it out.
   for i in [:m] do
-    let mut row := zeroRow
-    row := row.set! (n + i) 1
-    row := row.set! totalVars ((p.rowBounds.toArray[i]!).2.getD 0)
-    tab := tab.set! (i + 1) row
-  -- Sum the sparse `A` entries into the constraint rows. `validate`
-  -- already deduplicates, so the addition is identical to overwriting
-  -- on the intended path; doing it additively keeps the semantics
-  -- the same as `LPVerify.evalAx` for direct callers (e.g. tests)
-  -- that bypass `validate`.
-  for entry in p.a do
-    let (r, c, v) := entry
-    let row := tab[r.val + 1]!
-    tab := tab.set! (r.val + 1) (row.set! c.val (row[c.val]! + v))
-  pure { tab := tab, basis := (Array.range m).map (· + n) }
+    let bv := st.basis[i]!
+    let coeff := tab[0]![bv]!
+    if coeff ≠ 0 then
+      tab := subRow tab 0 (i + 1) coeff colCount
+  pure { tab := tab, basis := st.basis }
+
+/-! ## Pivot selection. -/
 
 /-- Pick the entering column by Bland's rule: smallest column index
-    whose reduced cost is strictly negative. Returns `none` when
-    the current basis is already optimal. -/
-private def chooseEntering (tab : Array (Array Rat)) (totalVars : Nat) :
+    `j < entBound` whose reduced cost is strictly negative. The bound
+    is `n + m + numArt` in phase 1 (any column may enter) and `n + m`
+    in phase 2 (artificials are locked out). Returns `none` when the
+    current basis is already optimal within the bound. -/
+private def chooseEntering (tab : Array (Array Rat)) (entBound : Nat) :
     Option Nat := Id.run do
-  for j in [:totalVars] do
+  for j in [:entBound] do
     if tab[0]![j]! < 0 then return some j
   pure none
 
@@ -146,14 +244,14 @@ private def chooseEntering (tab : Array (Array Rat)) (totalVars : Nat) :
     tie-break (smallest basis-variable index among ties). Returns
     the *1-based* tableau row index, or `none` if every coefficient
     in the entering column is `≤ 0` (the LP is unbounded along
-    this direction). -/
-private def chooseLeaving (st : State) (enter totalVars : Nat) :
+    this direction). `rhsCol` is the column index of the rhs. -/
+private def chooseLeaving (st : State) (enter rhsCol : Nat) :
     Option Nat := Id.run do
   let mut best : Option (Rat × Nat × Nat) := none
   for i in [1:st.basis.size + 1] do
     let aij := st.tab[i]![enter]!
     if aij > 0 then
-      let ratio := st.tab[i]![totalVars]! / aij
+      let ratio := st.tab[i]![rhsCol]! / aij
       let bv := st.basis[i - 1]!
       let take : Bool :=
         match best with
@@ -164,7 +262,7 @@ private def chooseLeaving (st : State) (enter totalVars : Nat) :
 
 /-- Pivot at entry `(row, col)`: normalise the pivot row and
     eliminate `col` from every other row. -/
-private def pivot (st : State) (row col : Nat) : State := Id.run do
+private def pivot (st : State) (row col colCount : Nat) : State := Id.run do
   let mut tab := st.tab
   let pivotVal := tab[row]![col]!
   let pr : Array Rat := tab[row]!.map (· / pivotVal)
@@ -175,7 +273,7 @@ private def pivot (st : State) (row col : Nat) : State := Id.run do
       if coeff ≠ 0 then
         let ri := tab[i]!
         let mut ri' := ri
-        for j in [:ri.size] do
+        for j in [:colCount] do
           ri' := ri'.set! j (ri[j]! - coeff * pr[j]!)
         tab := tab.set! i ri'
   pure { tab := tab, basis := st.basis.set! (row - 1) col }
@@ -196,37 +294,77 @@ private inductive Outcome where
 
     Optimality and unboundedness are checked before fuel is consumed:
     an already-optimal LP returns `.optimal` even with `fuel = 0`,
-    and only an actual pivot draws from the budget. -/
-private def simplexLoop (st : State) (totalVars : Nat) (fuel : Nat) :
-    Outcome :=
-  match chooseEntering st.tab totalVars with
-  | none   => .optimal st
+    and only an actual pivot draws from the budget. The loop returns
+    the remaining fuel so callers can share a budget across phases. -/
+private def simplexLoop (st : State) (entBound rhsCol : Nat) (fuel : Nat) :
+    Outcome × Nat :=
+  match chooseEntering st.tab entBound with
+  | none   => (.optimal st, fuel)
   | some j =>
-    match chooseLeaving st j totalVars with
-    | none   => .unbounded st j
+    match chooseLeaving st j rhsCol with
+    | none   => (.unbounded st j, fuel)
     | some i =>
       match fuel with
-      | 0        => .iterLimit st
-      | fuel + 1 => simplexLoop (pivot st i j) totalVars fuel
+      | 0        => (.iterLimit st, 0)
+      | fuel + 1 => simplexLoop (pivot st i j (rhsCol + 1)) entBound rhsCol fuel
+
+/-! ## Phase 1 helpers. -/
+
+/-- Sum of basic-artificial rhs values: this is the phase 1 objective
+    at the current basis. Equals `0` exactly when no artificial is
+    basic at a positive value (i.e., the original LP has a feasible
+    starting basis). -/
+private def phase1ObjValue (st : State) (n m rhsCol : Nat) : Rat := Id.run do
+  let mut acc : Rat := 0
+  for i in [:m] do
+    let bv := st.basis[i]!
+    if bv ≥ n + m then
+      -- Basic artificial.
+      acc := acc + st.tab[i + 1]![rhsCol]!
+  pure acc
+
+/-- After phase 1, drive any artificial that is still basic (at value
+    `0`, since phase 1 reached optimum `0`) out of the basis. If the
+    artificial's row has a nonzero entry in any non-artificial column,
+    pivot on the smallest such column. Otherwise the row is redundant
+    (zero coefficients on all real variables) and the artificial is
+    left basic at `0`; phase 2 will not pick it. -/
+private def driveOutArtificials (st : State) (n m rhsCol : Nat) : State :=
+  Id.run do
+    let nonArtBound := n + m
+    let colCount := rhsCol + 1
+    let mut st := st
+    for i in [:m] do
+      let bv := st.basis[i]!
+      if bv ≥ nonArtBound then
+        -- Find a pivot column among non-artificial columns.
+        let mut pivotCol : Option Nat := none
+        for j in [:nonArtBound] do
+          if pivotCol.isNone ∧ st.tab[i + 1]![j]! ≠ 0 then
+            pivotCol := some j
+        match pivotCol with
+        | some j => st := pivot st (i + 1) j colCount
+        | none   => ()
+    pure st
 
 /-! ## Certificate extraction. -/
 
 /-- Primal solution `x ∈ ℚⁿ`: basic structural variables read their
     rhs, non-basic ones are zero. -/
-private def extractPrimal (st : State) (n totalVars : Nat) : Array Rat :=
+private def extractPrimal (st : State) (n rhsCol : Nat) : Array Rat :=
   Id.run do
     let mut x : Array Rat := Array.replicate n 0
     for i in [:st.basis.size] do
       let bv := st.basis[i]!
       if bv < n then
-        x := x.set! bv st.tab[i + 1]![totalVars]!
+        x := x.set! bv st.tab[i + 1]![rhsCol]!
     pure x
 
-/-- Row-dual multipliers `u ∈ ℚᵐ` for `Ax ≤ b`. They are read
-    straight off the slack columns of the final reduced-cost row:
-    `uᵢ = tab[0, n+i]`. These are `≥ 0` at optimum (the simplex
-    optimality condition translated through `u = -y`, where `y`
-    are the textbook simplex multipliers). -/
+/-- Row-dual multipliers `y ∈ ℚᵐ` for `Ax ≤ b`. They are read straight
+    off the slack columns of the final reduced-cost row: `yᵢ = tab[0,
+    n+i]`. The same formula gives the optimal dual in phase 2 and the
+    Farkas multipliers in phase 1 (this is exactly the sign-convention
+    match the verifier asks for: `DualBundle.rowUpper ≥ 0`). -/
 private def extractDualRow (st : State) (n m : Nat) : Array Rat :=
   Id.run do
     let mut u : Array Rat := Array.mkEmpty m
@@ -235,8 +373,8 @@ private def extractDualRow (st : State) (n m : Nat) : Array Rat :=
     pure u
 
 /-- Reduced costs `z ∈ ℚⁿ` of the structural variables, read off
-    the final row 0. `≥ 0` at optimum; the verifier consumes them
-    as `colLower`. -/
+    the final row 0. `≥ 0` at optimum (phase 2) or under Farkas
+    feasibility (phase 1); the verifier consumes them as `colLower`. -/
 private def extractRedCost (st : State) (n : Nat) : Array Rat :=
   Id.run do
     let mut z : Array Rat := Array.mkEmpty n
@@ -462,6 +600,15 @@ private def translateSolution {m n : Nat} (p : Problem m n)
             certificate := { primal := some (toVec xArr n), dual := none, ray := some (toVec rArr n) }
             log         := sol.log }
       | _, _ => { sol with certificate := default }
+  | .infeasible =>
+      match sol.certificate.dual with
+      | some d =>
+          let dual := translateDual pp d
+          { status      := .infeasible
+            objective   := none
+            certificate := { primal := none, dual := some dual, ray := none }
+            log         := sol.log }
+      | none => { sol with certificate := default }
   | _ =>
       { status      := sol.status
         objective   := sol.objective
@@ -470,47 +617,107 @@ private def translateSolution {m n : Nat} (p : Problem m n)
 
 /-! ## Public entry point. -/
 
+/-- Build the optimal-solution `Certificate`. -/
+private def optimalSolution {m n : Nat} (p : Problem m n) (st : State)
+    (n_ m_ rhsCol : Nat) : Solution m n :=
+  let xArr := extractPrimal st n_ rhsCol
+  let uArr := extractDualRow st n_ m_
+  let zArr := extractRedCost st n_
+  let dual : DualBundle m n :=
+    { rowLower := zeroVec m
+      rowUpper := toVec uArr m
+      colLower := toVec zArr n
+      colUpper := zeroVec n }
+  let cert : Certificate m n :=
+    { primal := some (toVec xArr n)
+      dual   := some dual
+      ray    := none }
+  { status      := .optimal
+    objective   := some (dotArr p.c.toArray xArr + p.objOffset)
+    certificate := cert
+    log         := "" }
+
+/-- Build the unbounded-solution `Certificate`. -/
+private def unboundedSolution {m n : Nat} (st : State) (enter n_ rhsCol : Nat) :
+    Solution m n :=
+  let xArr := extractPrimal st n_ rhsCol
+  let rArr := extractRay st enter n_
+  let cert : Certificate m n :=
+    { primal := some (toVec xArr n)
+      dual   := none
+      ray    := some (toVec rArr n) }
+  { status      := .unbounded
+    objective   := none
+    certificate := cert
+    log         := "" }
+
+/-- Build the infeasible (Farkas) `Certificate` from phase 1's final
+    tableau. The Farkas multipliers `yᵢ ≥ 0` live in `rowUpper`; the
+    `zL ≥ 0` slack on `x ≥ 0` lives in `colLower`. Together they
+    satisfy `Aᵀy + (-zL) = 0` (stationarity) and `bᵀy < 0`, which
+    `LPVerify.checkInfeasible` re-derives directly. -/
+private def infeasibleSolution {m n : Nat} (st : State) (n_ m_ : Nat) :
+    Solution m n :=
+  let yArr := extractDualRow st n_ m_
+  let zArr := extractRedCost st n_
+  let dual : DualBundle m n :=
+    { rowLower := zeroVec m
+      rowUpper := toVec yArr m
+      colLower := toVec zArr n
+      colUpper := zeroVec n }
+  let cert : Certificate m n :=
+    { primal := none
+      dual   := some dual
+      ray    := none }
+  { status      := .infeasible
+    objective   := none
+    certificate := cert
+    log         := "" }
+
+/-- Iteration-limit solution. -/
+private def iterLimitSolution {m n : Nat} : Solution m n :=
+  { status      := .iterLimit
+    objective   := none
+    certificate := default
+    log         := "" }
+
 /-- Solve a min-form standard problem and produce a certificate against it. -/
 private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
     Except SolveError (Solution m n) :=
   match checkScope p with
   | .error e => .error (.bridge e.toMsg)
   | .ok () =>
-    let totalVars := n + m
-    match simplexLoop (initialState p) totalVars fuel with
-    | .iterLimit _ =>
-      .ok { status      := .iterLimit
-            objective   := none
-            certificate := default
-            log         := "" }
-    | .optimal st =>
-      let xArr := extractPrimal st n totalVars
-      let uArr := extractDualRow st n m
-      let zArr := extractRedCost st n
-      let dual : DualBundle m n :=
-        { rowLower := zeroVec m
-          rowUpper := toVec uArr m
-          colLower := toVec zArr n
-          colUpper := zeroVec n }
-      let cert : Certificate m n :=
-        { primal := some (toVec xArr n)
-          dual   := some dual
-          ray    := none }
-      .ok { status      := .optimal
-            objective   := some (dotArr p.c.toArray xArr + p.objOffset)
-            certificate := cert
-            log         := "" }
-    | .unbounded st enter =>
-      let xArr := extractPrimal st n totalVars
-      let rArr := extractRay st enter n
-      let cert : Certificate m n :=
-        { primal := some (toVec xArr n)
-          dual   := none
-          ray    := some (toVec rArr n) }
-      .ok { status      := .unbounded
-            objective   := none
-            certificate := cert
-            log         := "" }
+    let (infos, numArt) := computeRowInfos p
+    let totalVars := n + m + numArt
+    let rhsCol := totalVars
+    let colCount := totalVars + 1
+    let st0 := initialState p infos numArt
+    -- Phase 1 (skipped when there are no artificials).
+    if numArt = 0 then
+      let stP2 := setupPhase2 st0 p colCount
+      match (simplexLoop stP2 (n + m) rhsCol fuel).1 with
+      | .iterLimit _      => .ok iterLimitSolution
+      | .unbounded st enter => .ok (unboundedSolution st enter n rhsCol)
+      | .optimal st       => .ok (optimalSolution p st n m rhsCol)
+    else
+      let stP1 := setupPhase1 st0 infos colCount
+      let (out1, fuel1) := simplexLoop stP1 totalVars rhsCol fuel
+      match out1 with
+      | .iterLimit _ => .ok iterLimitSolution
+      | .unbounded _ _ =>
+        -- Phase 1 minimises a sum of nonneg variables, bounded below
+        -- by `0`. Unboundedness here is a bridge-invariant violation.
+        .error (.bridge "pure-Lean backend: phase 1 reported unbounded (internal bug)")
+      | .optimal st1 =>
+        if phase1ObjValue st1 n m rhsCol > 0 then
+          .ok (infeasibleSolution st1 n m)
+        else
+          let stClean := driveOutArtificials st1 n m rhsCol
+          let stP2 := setupPhase2 stClean p colCount
+          match (simplexLoop stP2 (n + m) rhsCol fuel1).1 with
+          | .iterLimit _      => .ok iterLimitSolution
+          | .unbounded st enter => .ok (unboundedSolution st enter n rhsCol)
+          | .optimal st       => .ok (optimalSolution p st n m rhsCol)
 
 /-- Solve a min-form problem and produce a certificate against it. -/
 private def solveCanon {m n : Nat} (p : Problem m n) (fuel : Nat) :
