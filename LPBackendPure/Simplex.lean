@@ -17,7 +17,8 @@
   considerably simpler to get correct; on toy LPs (the only use
   case for the zero-deps backend) the difference is negligible.
 
-  Scope of the simplex core (rejected with `SolveError.bridge` otherwise):
+  Scope of the simplex core (rejected with
+  `SolveError.invalidProblem (.unsupportedFeature _)` otherwise):
   * Inequality form only: every row must be `(none, some hi)`.
   * Non-negative variables only: every column must be `(some 0, none)`.
   The public `solve` entry point accepts every row/column shape and
@@ -54,13 +55,19 @@
   `IsOptimal` definition. The user-facing `Solution.objective` is
   restored to the caller's original sense by negation.
 
-  Out-of-scope inputs use `SolveError.bridge` for now, since
-  `ProblemError` has no "unsupported feature" variant. When LPCore
-  grows one, we can switch to `SolveError.invalidProblem` without
-  changing the user experience.
+  Out-of-scope inputs surface as `SolveError.invalidProblem
+  (.unsupportedFeature msg)`, so a dispatcher can fall through to a
+  more capable backend instead of treating the miss as a bridge
+  failure.
 -/
 
-import LPCore
+module
+
+public import LPCore
+
+-- A plain `public section` (no `@[expose]`): the simplex is run, not
+-- definitionally unfolded, and its helpers stay `private`.
+public section
 
 namespace LP.Backend.Pure
 
@@ -842,7 +849,7 @@ private def iterLimitSolution {m n : Nat} (st : State) (n_ rhsCol : Nat)
 private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
     Except SolveError (Solution m n) :=
   match checkScope p with
-  | .error e => .error (.bridge e.toMsg)
+  | .error e => .error (.invalidProblem (.unsupportedFeature e.toMsg))
   | .ok () =>
     let (infos, numArt) := computeRowInfos p
     let totalVars := n + m + numArt
@@ -882,7 +889,7 @@ private def solveStandard {m n : Nat} (p : Problem m n) (fuel : Nat) :
 private def solveCanon {m n : Nat} (p : Problem m n) (fuel : Nat) :
     Except SolveError (Solution m n) :=
   match preprocess p with
-  | .error e => .error (.bridge e.toMsg)
+  | .error e => .error (.invalidProblem (.unsupportedFeature e.toMsg))
   | .ok pp =>
       match solveStandard pp.problem fuel with
       | .error e => .error e

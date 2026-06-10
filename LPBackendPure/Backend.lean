@@ -7,15 +7,17 @@
   they have lower priorities. With only this one imported, this is
   the default — what a zero-deps demo or CI lane uses.
 
-  Today the backend ships a working (trivially-`.ok ()`) probe and
-  a placeholder `solveExact` that returns a structured error.
-  `LPBackendPure.Simplex` (the actual revised-simplex
-  implementation) is the follow-up.
+  `solveExact` runs the two-phase tableau simplex in
+  `LPBackendPure.Simplex` on exact rationals; see that module (and
+  the README) for scope and performance caveats.
 -/
+module
 
-import LPCore
-import LPTactic.Registry
-import LPBackendPure.Simplex
+public import LPCore
+public import LPTactic.Registry
+public import LPBackendPure.Simplex
+
+@[expose] public section
 
 namespace LP.Backend.Pure
 
