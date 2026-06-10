@@ -1,11 +1,11 @@
 # LPBackendPure
 
-[![Lean](https://img.shields.io/badge/Lean-4.29.1-blue.svg)](./lean-toolchain)
+[![Lean](https://img.shields.io/badge/Lean-4.31.0--rc1-blue.svg)](./lean-toolchain)
 [![License](https://img.shields.io/github/license/leanprover/lp-backend-pure.svg)](./LICENSE)
 
 > **New here? Start at [`leanprover/lp`](https://github.com/leanprover/lp)** — the entry
 > point for the `lp` / `maximize` tactics and the verified LP solver. This repository is one
-> package of that family: the pure-Lean backend adapter (scaffold).
+> package of that family: the pure-Lean backend.
 
 Pure-Lean `LPBackend` adapter for the `by lp` tactic registry.
 Zero native deps, zero subprocess calls. Self-registers with the

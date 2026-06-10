@@ -6,7 +6,8 @@
   exercise both the solver and its dual / ray construction at
   once. Cases include `min`, `max`, multi-row, degenerate, and an
   unbounded direction (with the recession-ray check). One case is
-  out-of-scope and must come back as a `SolveError.bridge`.
+  out-of-scope and must come back as
+  `SolveError.invalidProblem (.unsupportedFeature _)`.
 
   Run via `lake test` or `lake exe simplex-tests`.
 -/
