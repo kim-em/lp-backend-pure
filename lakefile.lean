@@ -15,17 +15,17 @@ open Lake DSL
 -/
 
 require LPCore from git "https://github.com/leanprover/lp-core" @
-  "70ca150585f8439a830374b5bec602d391addbc9"
+  "96d003f40ada9c730ae9fe100716214273be651b"
 
 require LPTactic from git "https://github.com/leanprover/lp-tactic" @
-  "7ea556ad4d2bbd8d9d3e790cfb05206bd7f24d91"
+  "008252423f29f152cdd3bc4224897dadfab23be7"
 
 -- `LPVerify` is only used by the test suite (to re-check
 -- certificates the backend produces). It is reachable transitively
 -- through `LPTactic`'s lake-manifest, but listing it explicitly
 -- keeps the test target's intent obvious.
 require LPVerify from git "https://github.com/leanprover/lp-verify" @
-  "e8e337f4b6c6f666b5dc7b43bc1ae6cc9d15fa05"
+  "3c49af332e3efcbd43766bcedbf9e549c8763752"
 
 package LPBackendPure
 
